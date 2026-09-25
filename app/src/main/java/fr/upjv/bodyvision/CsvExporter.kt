@@ -44,11 +44,12 @@ object CsvExporter {
         sb.append(runInfo.batteryEndPct).append('\n')
         sb.append('\n')
         sb.append(
-            "t_secondes,fps,latence_mediane_ms,latence_p95_ms,frames_droppees,temp_batterie_c," +
+            "t_secondes,phase,fps,latence_mediane_ms,latence_p95_ms,frames_droppees,temp_batterie_c," +
                 "etat_thermique,batterie_pct,likelihood_moyen,angle_genou_deg,ecart_type_angle_deg\n"
         )
         for (r in records) {
             sb.append(r.tSeconds).append(',')
+            sb.append(r.phase).append(',')
             sb.append(fmt(r.fps)).append(',')
             sb.append(fmt(r.latencyMedianMs)).append(',')
             sb.append(fmt(r.latencyP95Ms)).append(',')

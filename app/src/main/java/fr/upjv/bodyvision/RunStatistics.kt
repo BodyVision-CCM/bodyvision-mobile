@@ -9,6 +9,7 @@ import kotlin.math.sqrt
 /** Une ligne du tableau CSV, une par seconde écoulée depuis le début du run. */
 data class SecondRecord(
     val tSeconds: Long,
+    val phase: String,
     val fps: Double,
     val latencyMedianMs: Double,
     val latencyP95Ms: Double,
@@ -47,6 +48,9 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
     private val latencyWindow = ArrayDeque<Pair<Long, Long>>() // (t ms, latence ns)
     private val likelihoodWindow = ArrayDeque<Pair<Long, Double>>() // (t ms, likelihood moyen frame)
     private val angleWindow = ArrayDeque<Pair<Long, Double>>() // (t ms, angle genou deg), fenêtre 10 s
+
+    // Échantillons de latence de toute la phase "mesure" (hors chauffe), pour le résumé de fin de run.
+    private val latencyNanosPostWarmup = mutableListOf<Long>()
 
     @Volatile
     private var lastKneeAngleDeg: Double = Double.NaN
@@ -92,27 +96,29 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
             lastKneeAngleDeg = kneeAngleDeg
         }
 
+        // Fenêtres d'affichage : alimentées dès t=0, y compris pendant la chauffe, pour que le
+        // HUD et les lignes CSV "chauffe" montrent de vraies valeurs et non des 0.00.
+        latencyWindow.addLast(t to latencyNanos)
+        while (latencyWindow.isNotEmpty() && t - latencyWindow.first().first > 5000) {
+            latencyWindow.removeFirst()
+        }
+        if (avgLikelihood != null && !avgLikelihood.isNaN()) {
+            likelihoodWindow.addLast(t to avgLikelihood)
+            while (likelihoodWindow.isNotEmpty() && t - likelihoodWindow.first().first > 1000) {
+                likelihoodWindow.removeFirst()
+            }
+        }
+        if (kneeAngleDeg != null && !kneeAngleDeg.isNaN()) {
+            angleWindow.addLast(t to kneeAngleDeg)
+            while (angleWindow.isNotEmpty() && t - angleWindow.first().first > 10_000) {
+                angleWindow.removeFirst()
+            }
+        }
+
+        // Statistiques de résumé : la chauffe reste exclue.
         if (!warmupActive) {
             analyzedPostWarmupCount++
-
-            latencyWindow.addLast(t to latencyNanos)
-            while (latencyWindow.isNotEmpty() && t - latencyWindow.first().first > 5000) {
-                latencyWindow.removeFirst()
-            }
-
-            if (avgLikelihood != null && !avgLikelihood.isNaN()) {
-                likelihoodWindow.addLast(t to avgLikelihood)
-                while (likelihoodWindow.isNotEmpty() && t - likelihoodWindow.first().first > 1000) {
-                    likelihoodWindow.removeFirst()
-                }
-            }
-
-            if (kneeAngleDeg != null && !kneeAngleDeg.isNaN()) {
-                angleWindow.addLast(t to kneeAngleDeg)
-                while (angleWindow.isNotEmpty() && t - angleWindow.first().first > 10_000) {
-                    angleWindow.removeFirst()
-                }
-            }
+            latencyNanosPostWarmup.add(latencyNanos)
         }
     }
 
@@ -168,7 +174,7 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
 
     fun addSecondRecord(record: SecondRecord) {
         secondRecords.add(record)
-        if (!warmupActive) {
+        if (record.phase == PHASE_MEASURE) {
             fpsHistoryPostWarmup.add(record.fps)
             angleStdDevHistoryPostWarmup.add(record.angleStdDevDeg)
         }
@@ -178,15 +184,20 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
 
     fun summary(): RunSummary {
         val fpsList = fpsHistoryPostWarmup.ifEmpty { listOf(0.0) }
-        val allLatenciesNanos = synchronized(this) { latencyWindow.map { it.second } }
+        val latenciesNanos = synchronized(this) { latencyNanosPostWarmup.toList() }
         return RunSummary(
             avgFps = fpsList.average(),
             minFps = fpsList.min(),
-            latencyMedianMs = percentile(allLatenciesNanos, 0.5),
-            latencyP95Ms = percentile(allLatenciesNanos, 0.95),
+            latencyMedianMs = percentile(latenciesNanos, 0.5),
+            latencyP95Ms = percentile(latenciesNanos, 0.95),
             maxThermalStatus = maxThermalStatus,
             avgAngleStdDevDeg = angleStdDevHistoryPostWarmup.ifEmpty { listOf(0.0) }.average()
         )
+    }
+
+    companion object {
+        const val PHASE_WARMUP = "chauffe"
+        const val PHASE_MEASURE = "mesure"
     }
 }
 

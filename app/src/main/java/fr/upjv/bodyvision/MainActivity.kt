@@ -396,10 +396,12 @@ class MainActivity : AppCompatActivity() {
         val angle = stats.lastKneeAngle()
         val angleStd = stats.currentAngleStdDev()
         val tSeconds = stats.elapsedSeconds()
+        val phase = if (stats.warmupActive) RunStatistics.PHASE_WARMUP else RunStatistics.PHASE_MEASURE
 
         stats.addSecondRecord(
             SecondRecord(
                 tSeconds = tSeconds,
+                phase = phase,
                 fps = fps,
                 latencyMedianMs = latMed,
                 latencyP95Ms = latP95,
