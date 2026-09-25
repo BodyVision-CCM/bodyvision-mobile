@@ -20,7 +20,10 @@ data class RunInfo(
     val durationSeconds: Long,
     val batteryStartPct: Int,
     val batteryEndPct: Int,
-    val startedHot: Boolean
+    val startedHot: Boolean,
+    val durationModeLabel: String,
+    val targetDurationSeconds: Long,
+    val cutShort: Boolean
 )
 
 /**
@@ -36,7 +39,7 @@ object CsvExporter {
         val sb = StringBuilder()
         sb.append(
             "modele_telephone,version_android,configuration,resolution,date,duree_s," +
-                "depart_a_chaud,batterie_debut_pct,batterie_fin_pct\n"
+                "mode_duree,duree_choisie_s,run_ecourte,depart_a_chaud,batterie_debut_pct,batterie_fin_pct\n"
         )
         sb.append(csvEscape(runInfo.phoneModel)).append(',')
         sb.append(runInfo.androidVersion).append(',')
@@ -44,6 +47,9 @@ object CsvExporter {
         sb.append(runInfo.resolution).append(',')
         sb.append(runInfo.startDateIso).append(',')
         sb.append(runInfo.durationSeconds).append(',')
+        sb.append(csvEscape(runInfo.durationModeLabel)).append(',')
+        sb.append(runInfo.targetDurationSeconds).append(',')
+        sb.append(runInfo.cutShort).append(',')
         sb.append(runInfo.startedHot).append(',')
         sb.append(runInfo.batteryStartPct).append(',')
         sb.append(runInfo.batteryEndPct).append('\n')

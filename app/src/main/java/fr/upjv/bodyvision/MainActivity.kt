@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlayView: SkeletonOverlayView
     private lateinit var hudText: TextView
     private lateinit var configSpinner: Spinner
+    private lateinit var durationSpinner: Spinner
     private lateinit var startStopButton: Button
     private lateinit var exportJsonButton: Button
 
@@ -56,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var poseDetector: PoseDetector? = null
     private var currentConfig: PoseConfig = PoseConfig.CONFIG_1_BASE_DEFAULT
+    private var currentDurationMode: RunDurationMode = RunDurationMode.ENDURANCE
 
     private var runStats: RunStatistics? = null
     private var isRunning = false
@@ -73,7 +75,10 @@ class MainActivity : AppCompatActivity() {
     private val tickRunnable = object : Runnable {
         override fun run() {
             onSecondTick()
-            tickHandler.postDelayed(this, 1000)
+            // Ne replanifie pas si le tick vient de déclencher un arrêt (auto-stop ou stopRun()).
+            if (isRunning) {
+                tickHandler.postDelayed(this, 1000)
+            }
         }
     }
 
@@ -135,6 +140,7 @@ class MainActivity : AppCompatActivity() {
         overlayView = findViewById(R.id.overlay_view)
         hudText = findViewById(R.id.hud_text)
         configSpinner = findViewById(R.id.config_spinner)
+        durationSpinner = findViewById(R.id.duration_spinner)
         startStopButton = findViewById(R.id.start_stop_button)
         exportJsonButton = findViewById(R.id.export_json_button)
 
@@ -143,6 +149,7 @@ class MainActivity : AppCompatActivity() {
         batteryMonitor = BatteryMonitor(this)
 
         setupSpinner()
+        setupDurationSpinner()
         startStopButton.setOnClickListener { onStartStopClicked() }
         exportJsonButton.setOnClickListener { onExportJsonClicked() }
 
@@ -184,6 +191,15 @@ class MainActivity : AppCompatActivity() {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         configSpinner.adapter = adapter
         configSpinner.setSelection(0)
+    }
+
+    private fun setupDurationSpinner() {
+        val modes = RunDurationMode.values()
+        val labels = modes.map { it.label }
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        durationSpinner.adapter = adapter
+        durationSpinner.setSelection(modes.indexOf(RunDurationMode.ENDURANCE))
     }
 
     private fun showProtocolReminder() {
@@ -292,6 +308,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun proceedStartRun(startedHot: Boolean) {
         currentConfig = PoseConfig.values()[configSpinner.selectedItemPosition]
+        currentDurationMode = RunDurationMode.values()[durationSpinner.selectedItemPosition]
         runStartedHot = startedHot
 
         poseDetector?.close()
@@ -311,6 +328,7 @@ class MainActivity : AppCompatActivity() {
 
         isRunning = true
         configSpinner.isEnabled = false
+        durationSpinner.isEnabled = false
         startStopButton.text = "Arrêter"
 
         tickHandler.removeCallbacks(tickRunnable)
@@ -321,6 +339,7 @@ class MainActivity : AppCompatActivity() {
         isRunning = false
         tickHandler.removeCallbacks(tickRunnable)
         configSpinner.isEnabled = true
+        durationSpinner.isEnabled = true
         startStopButton.text = "Démarrer"
 
         val stats = runStats
@@ -332,6 +351,8 @@ class MainActivity : AppCompatActivity() {
         val batteryEndPct = batteryMonitor.batteryPercent()
         val tempEndC = batteryMonitor.temperatureCelsius()
         val timestamp = fileTimestampNow()
+        val elapsedSeconds = stats.elapsedSeconds()
+        val cutShort = elapsedSeconds < currentDurationMode.durationSeconds
 
         val runInfo = RunInfo(
             phoneModel = "${Build.MANUFACTURER} ${Build.MODEL}",
@@ -339,10 +360,13 @@ class MainActivity : AppCompatActivity() {
             config = currentConfig,
             resolution = "${currentConfig.analysisResolution.width}x${currentConfig.analysisResolution.height}",
             startDateIso = runStartTimestampIso,
-            durationSeconds = stats.elapsedSeconds(),
+            durationSeconds = elapsedSeconds,
             batteryStartPct = batteryStartPct,
             batteryEndPct = batteryEndPct,
-            startedHot = runStartedHot
+            startedHot = runStartedHot,
+            durationModeLabel = currentDurationMode.label,
+            targetDurationSeconds = currentDurationMode.durationSeconds,
+            cutShort = cutShort
         )
 
         val csvContent = CsvExporter.buildCsvContent(runInfo, stats.secondRecords)
@@ -366,10 +390,15 @@ class MainActivity : AppCompatActivity() {
     private fun showSummaryDialog(summary: RunSummary, runInfo: RunInfo, tempStart: Double, tempEnd: Double) {
         val verdict = if (summary.meetsThresholds) "SEUILS OK" else "SEUILS NON ATTEINTS"
         val message = buildString {
+            if (runInfo.cutShort) {
+                append("⚠ RUN ÉCOURTÉ, RÉSULTAT NON VALIDE POUR LA NOTE DE MESURES\n")
+                append("(${runInfo.durationSeconds}s sur ${runInfo.targetDurationSeconds}s prévues - ${runInfo.durationModeLabel})\n\n")
+            }
             if (runInfo.startedHot) {
                 append("⚠ Run démarré à chaud (garde-fou thermique ignoré)\n\n")
             }
             append("Configuration : ${runInfo.config.label}\n")
+            append("Mode : ${runInfo.durationModeLabel}\n")
             append("Durée : ${runInfo.durationSeconds} s\n\n")
             append(String.format(Locale.US, "FPS moyen : %.1f (min %.1f)\n", summary.avgFps, summary.minFps))
             append(String.format(Locale.US, "Latence médiane : %.1f ms\n", summary.latencyMedianMs))
@@ -464,6 +493,10 @@ class MainActivity : AppCompatActivity() {
             append(String.format(Locale.US, "FPS %.1f (moy %.1f)  lat med %.0fms p95 %.0fms\n", fps, avgFps, latMed, latP95))
             append(String.format(Locale.US, "temp %.1f°C | %s | batt %d%% | t=%s\n", temp, thermalLabel, battPct, formatElapsed(tSeconds)))
             append(String.format(Locale.US, "angle genou D: %s° | écart-type %.1f°", angleText, angleStd))
+        }
+
+        if (tSeconds >= currentDurationMode.durationSeconds) {
+            stopRun()
         }
     }
 
