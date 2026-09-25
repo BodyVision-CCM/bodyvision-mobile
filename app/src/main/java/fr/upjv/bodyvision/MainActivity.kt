@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import android.widget.ArrayAdapter
@@ -66,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private var runStartTimestampIso = ""
     private var batteryStartPct = -1
     private var tempStartC = Double.NaN
+    private var runStartedHot = false
 
     private val tickHandler = Handler(Looper.getMainLooper())
     private val tickRunnable = object : Runnable {
@@ -260,7 +262,38 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        val tempNow = batteryMonitor.temperatureCelsius()
+        val thermalNow = thermalMonitor.currentStatus
+        val thermalOk = (tempNow.isNaN() || tempNow <= THERMAL_GUARD_MAX_TEMP_C) &&
+            thermalNow <= PowerManager.THERMAL_STATUS_LIGHT
+        if (!thermalOk) {
+            showThermalGuardDialog(tempNow, thermalNow)
+            return
+        }
+        proceedStartRun(startedHot = false)
+    }
+
+    private fun showThermalGuardDialog(tempNow: Double, thermalNow: Int) {
+        val tempText = if (tempNow.isNaN()) "inconnue" else String.format(Locale.US, "%.1f°C", tempNow)
+        val message = buildString {
+            append("Le téléphone est trop chaud pour un run fiable.\n\n")
+            append("Température actuelle : $tempText (seuil : ${THERMAL_GUARD_MAX_TEMP_C.toInt()}°C)\n")
+            append("État thermique actuel : ${ThermalMonitor.statusLabel(thermalNow)} (seuil : LIGHT)\n\n")
+            append("Laissez refroidir le téléphone (15 min, départ sous 30°C, cf. protocole) avant un run destiné à la note de mesures.")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Téléphone trop chaud")
+            .setMessage(message)
+            .setCancelable(true)
+            .setNegativeButton("Attendre", null)
+            .setPositiveButton("Démarrer quand même") { _, _ -> proceedStartRun(startedHot = true) }
+            .show()
+    }
+
+    private fun proceedStartRun(startedHot: Boolean) {
         currentConfig = PoseConfig.values()[configSpinner.selectedItemPosition]
+        runStartedHot = startedHot
+
         poseDetector?.close()
         poseDetector = PoseDetection.getClient(currentConfig.buildOptions())
         lastPose = null
@@ -308,7 +341,8 @@ class MainActivity : AppCompatActivity() {
             startDateIso = runStartTimestampIso,
             durationSeconds = stats.elapsedSeconds(),
             batteryStartPct = batteryStartPct,
-            batteryEndPct = batteryEndPct
+            batteryEndPct = batteryEndPct,
+            startedHot = runStartedHot
         )
 
         val csvContent = CsvExporter.buildCsvContent(runInfo, stats.secondRecords)
@@ -332,6 +366,9 @@ class MainActivity : AppCompatActivity() {
     private fun showSummaryDialog(summary: RunSummary, runInfo: RunInfo, tempStart: Double, tempEnd: Double) {
         val verdict = if (summary.meetsThresholds) "SEUILS OK" else "SEUILS NON ATTEINTS"
         val message = buildString {
+            if (runInfo.startedHot) {
+                append("⚠ Run démarré à chaud (garde-fou thermique ignoré)\n\n")
+            }
             append("Configuration : ${runInfo.config.label}\n")
             append("Durée : ${runInfo.durationSeconds} s\n\n")
             append(String.format(Locale.US, "FPS moyen : %.1f (min %.1f)\n", summary.avgFps, summary.minFps))
@@ -441,4 +478,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun fileTimestampNow(): String =
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+    companion object {
+        private const val THERMAL_GUARD_MAX_TEMP_C = 35.0
+    }
 }
