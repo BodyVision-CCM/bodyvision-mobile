@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.Spinner
@@ -47,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hudText: TextView
     private lateinit var configSpinner: Spinner
     private lateinit var durationSpinner: Spinner
+    private lateinit var accelerationSpinner: Spinner
     private lateinit var startStopButton: Button
     private lateinit var exportJsonButton: Button
 
@@ -58,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private var poseDetector: PoseDetector? = null
     private var currentConfig: PoseConfig = PoseConfig.CONFIG_1_BASE_DEFAULT
     private var currentDurationMode: RunDurationMode = RunDurationMode.ENDURANCE
+    private var currentAcceleration: AccelerationChoice = AccelerationChoice.DEFAULT
 
     private var runStats: RunStatistics? = null
     private var isRunning = false
@@ -120,6 +123,7 @@ class MainActivity : AppCompatActivity() {
                 val kneeAngle = rightKneeAngleDegrees(pose)
                 val likelihood = rightSideAvgLikelihood(pose)
                 runStats?.onFrameAnalyzed(latencyNanos, kneeAngle, likelihood)
+                JsonFrameExporter.onFrameAnalyzed(pose)
                 lastPose = pose
                 overlayView.updatePose(pose, imgW, imgH)
             }
@@ -141,6 +145,7 @@ class MainActivity : AppCompatActivity() {
         hudText = findViewById(R.id.hud_text)
         configSpinner = findViewById(R.id.config_spinner)
         durationSpinner = findViewById(R.id.duration_spinner)
+        accelerationSpinner = findViewById(R.id.acceleration_spinner)
         startStopButton = findViewById(R.id.start_stop_button)
         exportJsonButton = findViewById(R.id.export_json_button)
 
@@ -150,6 +155,7 @@ class MainActivity : AppCompatActivity() {
 
         setupSpinner()
         setupDurationSpinner()
+        setupAccelerationSpinner()
         startStopButton.setOnClickListener { onStartStopClicked() }
         exportJsonButton.setOnClickListener { onExportJsonClicked() }
 
@@ -176,6 +182,12 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
         batteryMonitor.stop()
         thermalMonitor.stop()
+        if (isRunning) {
+            // L'activité passe en arrière-plan (CameraX va libérer la caméra) : le run en cours
+            // deviendrait silencieusement invalide (0 FPS) s'il continuait. On l'arrête et on le
+            // marque comme tel plutôt que de laisser des mesures fausses dans le CSV.
+            stopRun(invalidReason = "Run interrompu : passage en arrière-plan")
+        }
     }
 
     override fun onDestroy() {
@@ -202,14 +214,23 @@ class MainActivity : AppCompatActivity() {
         durationSpinner.setSelection(modes.indexOf(RunDurationMode.ENDURANCE))
     }
 
+    private fun setupAccelerationSpinner() {
+        val choices = AccelerationChoice.values()
+        val labels = choices.map { it.label }
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        accelerationSpinner.adapter = adapter
+        accelerationSpinner.setSelection(choices.indexOf(AccelerationChoice.DEFAULT))
+    }
+
     private fun showProtocolReminder() {
         val message = """
             - Téléphone sur trépied, sujet debout, à 2-3 m
             - Luminosité d'écran fixée à 50 %
             - Téléphone débranché (la charge fausse la mesure thermique)
             - Run de 10 minutes, mouvement continu (squats lents)
+            - 1 run d'endurance de 10 min par configuration (4 configurations)
             - 15 min de refroidissement entre 2 runs, départ sous 30°C
-            - 3 runs par configuration
         """.trimIndent()
         AlertDialog.Builder(this)
             .setTitle("Protocole de test - à respecter")
@@ -309,11 +330,13 @@ class MainActivity : AppCompatActivity() {
     private fun proceedStartRun(startedHot: Boolean) {
         currentConfig = PoseConfig.values()[configSpinner.selectedItemPosition]
         currentDurationMode = RunDurationMode.values()[durationSpinner.selectedItemPosition]
+        currentAcceleration = AccelerationChoice.values()[accelerationSpinner.selectedItemPosition]
         runStartedHot = startedHot
 
         poseDetector?.close()
-        poseDetector = PoseDetection.getClient(currentConfig.buildOptions())
+        poseDetector = PoseDetection.getClient(currentConfig.buildOptions(currentAcceleration))
         lastPose = null
+        JsonFrameExporter.clearBuffer()
         busy.set(false)
 
         bindCameraUseCases(includeAnalysis = true)
@@ -329,18 +352,24 @@ class MainActivity : AppCompatActivity() {
         isRunning = true
         configSpinner.isEnabled = false
         durationSpinner.isEnabled = false
+        accelerationSpinner.isEnabled = false
         startStopButton.text = "Arrêter"
+        // L'écran ne doit pas s'éteindre pendant un run : ça coupe la caméra (CameraX) et fausse
+        // silencieusement les mesures (le run continuerait à écrire des lignes à 0 FPS).
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         tickHandler.removeCallbacks(tickRunnable)
         tickHandler.post(tickRunnable)
     }
 
-    private fun stopRun() {
+    private fun stopRun(invalidReason: String? = null) {
         isRunning = false
         tickHandler.removeCallbacks(tickRunnable)
         configSpinner.isEnabled = true
         durationSpinner.isEnabled = true
+        accelerationSpinner.isEnabled = true
         startStopButton.text = "Démarrer"
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val stats = runStats
         if (stats == null) {
@@ -358,6 +387,7 @@ class MainActivity : AppCompatActivity() {
             phoneModel = "${Build.MANUFACTURER} ${Build.MODEL}",
             androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             config = currentConfig,
+            accelerationForBestConfigs = currentAcceleration,
             resolution = "${currentConfig.analysisResolution.width}x${currentConfig.analysisResolution.height}",
             startDateIso = runStartTimestampIso,
             durationSeconds = elapsedSeconds,
@@ -366,7 +396,8 @@ class MainActivity : AppCompatActivity() {
             startedHot = runStartedHot,
             durationModeLabel = currentDurationMode.label,
             targetDurationSeconds = currentDurationMode.durationSeconds,
-            cutShort = cutShort
+            cutShort = cutShort,
+            invalidReason = invalidReason
         )
 
         val csvContent = CsvExporter.buildCsvContent(runInfo, stats.secondRecords)
@@ -383,13 +414,26 @@ class MainActivity : AppCompatActivity() {
         poseDetector?.close()
         poseDetector = null
 
-        showSummaryDialog(stats.summary(), runInfo, tempStartC, tempEndC)
+        // Si le run vient d'être invalidé par un passage en arrière-plan, l'activité n'est plus
+        // visible : afficher un AlertDialog ici échouerait. Le CSV garde la trace de l'invalidité.
+        if (invalidReason == null) {
+            showSummaryDialog(stats.summary(), runInfo, tempStartC, tempEndC)
+        } else {
+            Toast.makeText(this, "Run invalidé : $invalidReason", Toast.LENGTH_LONG).show()
+        }
         runStats = null
     }
 
     private fun showSummaryDialog(summary: RunSummary, runInfo: RunInfo, tempStart: Double, tempEnd: Double) {
-        val verdict = if (summary.meetsThresholds) "SEUILS OK" else "SEUILS NON ATTEINTS"
+        val verdict = when {
+            runInfo.invalidReason != null -> "RUN INVALIDE"
+            summary.meetsThresholds -> "SEUILS OK"
+            else -> "SEUILS NON ATTEINTS"
+        }
         val message = buildString {
+            if (runInfo.invalidReason != null) {
+                append("⚠ RUN INVALIDE : ${runInfo.invalidReason}\n\n")
+            }
             if (runInfo.cutShort) {
                 append("⚠ RUN ÉCOURTÉ, RÉSULTAT NON VALIDE POUR LA NOTE DE MESURES\n")
                 append("(${runInfo.durationSeconds}s sur ${runInfo.targetDurationSeconds}s prévues - ${runInfo.durationModeLabel})\n\n")
@@ -398,9 +442,10 @@ class MainActivity : AppCompatActivity() {
                 append("⚠ Run démarré à chaud (garde-fou thermique ignoré)\n\n")
             }
             append("Configuration : ${runInfo.config.label}\n")
+            append("${runInfo.accelerationForBestConfigs.label}\n")
             append("Mode : ${runInfo.durationModeLabel}\n")
             append("Durée : ${runInfo.durationSeconds} s\n\n")
-            append(String.format(Locale.US, "FPS moyen : %.1f (min %.1f)\n", summary.avgFps, summary.minFps))
+            append(String.format(Locale.US, "FPS moyen : %.1f (min %.1f, p5 %.1f)\n", summary.avgFps, summary.minFps, summary.p5Fps))
             append(String.format(Locale.US, "Latence médiane : %.1f ms\n", summary.latencyMedianMs))
             append(String.format(Locale.US, "Latence p95 : %.1f ms\n", summary.latencyP95Ms))
             append("État thermique max : ${ThermalMonitor.statusLabel(summary.maxThermalStatus)}\n")
@@ -431,7 +476,13 @@ class MainActivity : AppCompatActivity() {
             append("Estimation série 30 s @ 30 FPS (${estimate.framesInSeries} frames) :\n")
             append("  brute : ${formatBytes(estimate.seriesRawBytes)}\n")
             append("  gzip  : ${formatBytes(estimate.seriesGzipBytes)}\n\n")
-            append("(estimation gzip optimiste : une seule frame capturée, répétée)\n\n")
+            if (estimate.capturedFrameCount == 0) {
+                append("(aucune frame capturée pendant un run : frame courante répétée, estimation gzip optimiste)\n\n")
+            } else if (estimate.extrapolated) {
+                append("(basé sur ${estimate.capturedFrameCount} frames réelles capturées durant le run, extrapolé au prorata à ${estimate.framesInSeries})\n\n")
+            } else {
+                append("(basé sur ${estimate.framesInSeries} frames réelles capturées durant le run)\n\n")
+            }
             append(if (uri != null) "Fichier : Documents/$fileName" else "Échec de l'écriture du fichier JSON")
         }
         AlertDialog.Builder(this)

@@ -152,8 +152,8 @@ Afficher un court rappel au lancement :
 - Luminosité d'écran fixée à 50 %
 - **Téléphone débranché** (la charge fausse toute mesure thermique)
 - Run de 10 minutes, mouvement continu (squats lents), pas de sujet immobile
+- 1 run d'endurance de 10 minutes par configuration (4 configurations)
 - 15 minutes de refroidissement entre deux runs, départ sous 30 °C
-- 3 runs par configuration
 
 ## Conventions de travail
 

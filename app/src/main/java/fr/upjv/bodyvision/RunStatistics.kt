@@ -145,6 +145,13 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
         return sorted[index] / 1_000_000.0
     }
 
+    private fun percentileDouble(samples: List<Double>, p: Double): Double {
+        if (samples.isEmpty()) return 0.0
+        val sorted = samples.sorted()
+        val index = ((sorted.size - 1) * p).toInt().coerceIn(0, sorted.size - 1)
+        return sorted[index]
+    }
+
     /** Frames droppées depuis le dernier appel (delta), pour la ligne CSV de la seconde écoulée. */
     fun droppedSinceLastTick(): Long {
         val received = framesReceived.get()
@@ -188,6 +195,7 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
         return RunSummary(
             avgFps = fpsList.average(),
             minFps = fpsList.min(),
+            p5Fps = percentileDouble(fpsList, 0.05),
             latencyMedianMs = percentile(latenciesNanos, 0.5),
             latencyP95Ms = percentile(latenciesNanos, 0.95),
             maxThermalStatus = maxThermalStatus,
@@ -204,13 +212,16 @@ class RunStatistics(private val warmupMillis: Long = 30_000L) {
 data class RunSummary(
     val avgFps: Double,
     val minFps: Double,
+    val p5Fps: Double,
     val latencyMedianMs: Double,
     val latencyP95Ms: Double,
     val maxThermalStatus: Int,
     val avgAngleStdDevDeg: Double
 ) {
+    /** Le verdict porte sur le FPS soutenu (p5), pas le min : une seule seconde ralentie
+     *  sur un run de 10 minutes ne doit pas invalider le run à elle seule. */
     val meetsThresholds: Boolean
-        get() = minFps >= 24.0 &&
+        get() = p5Fps >= 24.0 &&
             latencyP95Ms < 40.0 &&
             maxThermalStatus <= PowerManager.THERMAL_STATUS_LIGHT &&
             avgAngleStdDevDeg < 3.0

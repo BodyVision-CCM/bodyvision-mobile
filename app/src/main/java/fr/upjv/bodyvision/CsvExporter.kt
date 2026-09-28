@@ -15,6 +15,7 @@ data class RunInfo(
     val phoneModel: String,
     val androidVersion: String,
     val config: PoseConfig,
+    val accelerationForBestConfigs: AccelerationChoice,
     val resolution: String,
     val startDateIso: String,
     val durationSeconds: Long,
@@ -23,7 +24,8 @@ data class RunInfo(
     val startedHot: Boolean,
     val durationModeLabel: String,
     val targetDurationSeconds: Long,
-    val cutShort: Boolean
+    val cutShort: Boolean,
+    val invalidReason: String? = null
 )
 
 /**
@@ -38,12 +40,14 @@ object CsvExporter {
     fun buildCsvContent(runInfo: RunInfo, records: List<SecondRecord>): String {
         val sb = StringBuilder()
         sb.append(
-            "modele_telephone,version_android,configuration,resolution,date,duree_s," +
-                "mode_duree,duree_choisie_s,run_ecourte,depart_a_chaud,batterie_debut_pct,batterie_fin_pct\n"
+            "modele_telephone,version_android,configuration,acceleration_config3_4,resolution,date,duree_s," +
+                "mode_duree,duree_choisie_s,run_ecourte,depart_a_chaud,batterie_debut_pct,batterie_fin_pct," +
+                "run_invalide,raison_invalidite\n"
         )
         sb.append(csvEscape(runInfo.phoneModel)).append(',')
         sb.append(runInfo.androidVersion).append(',')
         sb.append(csvEscape(runInfo.config.label)).append(',')
+        sb.append(csvEscape(runInfo.accelerationForBestConfigs.label)).append(',')
         sb.append(runInfo.resolution).append(',')
         sb.append(runInfo.startDateIso).append(',')
         sb.append(runInfo.durationSeconds).append(',')
@@ -52,7 +56,9 @@ object CsvExporter {
         sb.append(runInfo.cutShort).append(',')
         sb.append(runInfo.startedHot).append(',')
         sb.append(runInfo.batteryStartPct).append(',')
-        sb.append(runInfo.batteryEndPct).append('\n')
+        sb.append(runInfo.batteryEndPct).append(',')
+        sb.append(runInfo.invalidReason != null).append(',')
+        sb.append(csvEscape(runInfo.invalidReason ?: "")).append('\n')
         sb.append('\n')
         sb.append(
             "t_secondes,phase,fps,latence_mediane_ms,latence_p95_ms,frames_droppees,temp_batterie_c," +
