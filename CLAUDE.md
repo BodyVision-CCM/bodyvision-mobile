@@ -1,8 +1,8 @@
-# BodyVision — Spike SCRUM-22 : PoC ML Kit Pose Detection
+# BodyVision2 — Spike SCRUM-22 : PoC ML Kit Pose Detection
 
 ## Contexte
 
-BodyVision est un projet académique de M2 (Master Cloud Computing and Mobility) : une
+BodyVision2 est un projet académique de M2 (Master Cloud Computing and Mobility) : une
 application Android qui analyse la biomécanique d'un mouvement de musculation en temps réel
 sur le téléphone (Edge), puis envoie les séances vers une plateforme Cloud (GKE, RabbitMQ,
 PostgreSQL) pour l'historique et la progression.

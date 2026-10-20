@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "BodyVision"
+rootProject.name = "BodyVision2"
 include(":app")

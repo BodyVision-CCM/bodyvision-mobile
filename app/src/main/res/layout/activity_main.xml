@@ -17,7 +17,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <fr.upjv.bodyvision.SkeletonOverlayView
+    <fr.upjv.bodyvision2.SkeletonOverlayView
         android:id="@+id/overlay_view"
         android:layout_width="0dp"
         android:layout_height="0dp"

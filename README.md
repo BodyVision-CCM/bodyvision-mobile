@@ -1,6 +1,6 @@
-# BodyVision — Spike SCRUM-22
+# BodyVision2 — Spike SCRUM-22
 
-Ce dépôt contient **uniquement un spike jetable**, pas l'application BodyVision finale.
+Ce dépôt contient **uniquement un spike jetable**, pas l'application BodyVision2 finale.
 Le seul but de ce code est de mesurer si ML Kit Pose Detection tient 30 FPS sur un
 Honor 400 (Snapdragon 7 Gen 3, Android 16) sans surchauffer, et si les angles calculés
 sont assez stables pour déclencher une alerte posturale fiable.

@@ -3,13 +3,13 @@ plugins {
 }
 
 android {
-    namespace = "fr.upjv.bodyvision"
+    namespace = "fr.upjv.bodyvision2"
     compileSdk {
         version = release(36)
     }
 
     defaultConfig {
-        applicationId = "fr.upjv.bodyvision"
+        applicationId = "fr.upjv.bodyvision2"
         minSdk = 24
         targetSdk = 36
         versionCode = 1

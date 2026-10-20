@@ -1,4 +1,4 @@
-package fr.upjv.bodyvision
+package fr.upjv.bodyvision2
 
 import android.content.Context
 import android.os.Build
