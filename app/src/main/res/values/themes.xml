@@ -7,6 +7,8 @@
 -->
 <resources>
     <style name="Theme.BodyVision" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+        <!-- Doit rester identique à BodyVisionBackground de core/ui/theme/Color.kt :
+             sinon le fond change de teinte au premier dessin de Compose. -->
+        <item name="android:windowBackground">#FF101010</item>
     </style>
 </resources>

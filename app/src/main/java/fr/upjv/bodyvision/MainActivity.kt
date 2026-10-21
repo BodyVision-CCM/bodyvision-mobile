@@ -49,7 +49,7 @@ private fun StartupScreen() {
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = stringResource(R.string.app_name),
+                text = stringResource(R.string.startup_title),
                 style = MaterialTheme.typography.headlineMedium,
             )
         }

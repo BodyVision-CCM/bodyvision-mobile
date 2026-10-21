@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Nom affiché par le lanceur. -->
     <string name="app_name">BodyVision</string>
+    <!-- Texte de l’écran d’attente, distinct du nom du lanceur pour qu’un
+         renommage pour la soutenance ne change pas les deux. -->
+    <string name="startup_title">BodyVision</string>
 </resources>
