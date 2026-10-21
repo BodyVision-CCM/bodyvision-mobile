@@ -129,6 +129,12 @@ le ramènera par transitivité dès SCRUM-31. La garantie est une règle de rele
 propriété du graphe de dépendances — rien n'empêche `AppCompatActivity` de compiler, et
 l'application plante alors au lancement sur un message qui accuse le thème.
 
+**Échéance, à ne pas perdre : SCRUM-31.** Le commit qui rajoute `camera-view` ajoute aussi
+une tâche Gradle de six lignes accrochée à `check`, qui échoue si `androidx.appcompat`
+apparaît dans `app/src`. C'est ce commit qui ramène `appcompat`, donc c'est lui qui porte la
+barrière. Pas de detekt : la chaîne d'outils est figée, et un second outil d'analyse ne se
+décide pas en effet de bord d'une règle d'import.
+
 Corollaire inchangé : si une ressource de thème manque à la compilation, le correctif est de
 pointer le parent vers un thème du framework (`android:Theme.*`), jamais de réintroduire
 `appcompat` ou `com.google.android.material`.

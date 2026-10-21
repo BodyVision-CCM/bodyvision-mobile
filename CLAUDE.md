@@ -125,3 +125,7 @@ un changement de configuration, forcer l'exécution :
 ```bash
 ./gradlew ktlintCheck --rerun-tasks
 ```
+
+Et pour prouver qu'une barrière échoue bien, injecter la violation puis la retirer par
+`git checkout -- <fichier>`, jamais par une copie manuelle : une coupure entre les deux
+laisse la violation sur le disque.
