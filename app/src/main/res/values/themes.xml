@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Thème de la fenêtre uniquement : il habille l'écran avant que Compose ne dessine.
+    Le parent est un thème du framework (android:Theme.*) et non Material Components,
+    pour que l'application n'ait pas à dépendre de la pile Views. Le thème réel de
+    l'interface vit dans core/ui/theme/Theme.kt.
+-->
+<resources>
+    <style name="Theme.BodyVision" parent="android:Theme.Material.NoActionBar">
+        <!-- Doit rester identique à BodyVisionBackground de core/ui/theme/Color.kt :
+             sinon le fond change de teinte au premier dessin de Compose. -->
+        <item name="android:windowBackground">#FF101010</item>
+    </style>
+</resources>

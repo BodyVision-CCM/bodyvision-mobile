@@ -2,6 +2,9 @@
 .gradle/
 build/
 
+# Sessions du démon Kotlin, créées par le support Kotlin intégré d’AGP 9
+.kotlin/
+
 # Local configuration file (sdk path, etc)
 local.properties
 

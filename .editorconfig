@@ -1,0 +1,19 @@
+root = true
+
+[*]
+charset = utf-8
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{kt,kts}]
+end_of_line = lf
+ktlint_code_style = ktlint_official
+max_line_length = 120
+# PascalCase est la convention officielle des fonctions @Composable : c est la regle
+# function-naming de ktlint qui doit les ignorer.
+ktlint_function_naming_ignore_when_annotated_with = Composable
+
+[*.bat]
+end_of_line = crlf

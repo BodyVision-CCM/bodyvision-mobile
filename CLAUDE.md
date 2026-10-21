@@ -16,7 +16,8 @@ caméra, pas le bon GPU, pas de gestion thermique. Un test sur émulateur ne pro
 
 ## Décisions figées — ne pas rouvrir
 
-Issues de tickets clos et validés en équipe.
+Issues de tickets clos et validés en équipe. La page de décisions du projet :
+https://bodyvision.atlassian.net/wiki/spaces/BV/pages/11206657
 
 - **Configuration ML Kit** : modèle de base, accélération `CPU_GPU`, résolution d'analyse
   640x480, `STREAM_MODE`. Mesuré sur l'appareil cible : 29,4 FPS, latence médiane 26,4 ms,
@@ -30,6 +31,27 @@ Issues de tickets clos et validés en équipe.
 - **Architecture** : découpage **par fonctionnalité** (`camera/`, `pose/`, `session/`…),
   avec les couches à l'intérieur de chaque fonctionnalité. Les dépendances pointent
   toujours vers le domaine, qui ne connaît ni Android, ni ML Kit, ni CameraX.
+
+## Chaîne d'outils — figée
+
+Décision du 21/10/2026. **Aucune montée de version avant un ticket dédié, après le
+jalon 1.**
+
+- **AGP 9.0.1**, `compileSdk 36`, `targetSdk 36`, Gradle 9.1.0.
+- **BOM Compose 2026.06.01** (Compose 1.11.4), **lifecycle 2.10.0**.
+- AGP 9 embarque son propre support Kotlin : **ne jamais appliquer `kotlin-android`**, il
+  entre en conflit. Le plugin compilateur Compose suit le KGP d'AGP, soit **2.2.10**.
+
+Ces versions ne sont pas un retard à rattraper, c'est un palier cohérent. Tout ce qui est
+au-delà — Compose 1.12, lifecycle 2.11 — exige AGP 9.1.0 **et** `compileSdk 37`, et le
+refuse à la compilation sur `checkDebugAarMetadata`. Monter l'un oblige à monter les trois.
+
+À rouvrir seulement si une API de Compose 1.12 devient nécessaire, ou si CameraX ou ML Kit
+exigent le SDK 37.
+
+**Les avertissements de lint `GradleDependency`, `AndroidGradlePluginVersion` et
+`OldTargetApi` sont donc attendus et ne constituent pas une liste de tâches.** Le critère
+reste `0 errors` ; le compte d'avertissements n'est pas un objectif.
 
 ## Kotlin — pièges de ce projet
 
@@ -94,3 +116,16 @@ Format de télémétrie, pour information — à implémenter en S6, pas avant :
 ./gradlew lint           # lint Android
 ./gradlew installDebug   # déploiement sur l'appareil connecté
 ```
+
+Un rapport ktlint ou lint posé sur le disque ne vaut que si la tâche qui l'écrit a
+réellement tourné : un `check` servi `UP-TO-DATE` laisse le rapport précédent en place, et
+on lit alors un compte périmé sans aucun signe que c'en est un. Pour un compte réel après
+un changement de configuration, forcer l'exécution :
+
+```bash
+./gradlew ktlintCheck --rerun-tasks
+```
+
+Et pour prouver qu'une barrière échoue bien, injecter la violation puis la retirer par
+`git checkout -- <fichier>`, jamais par une copie manuelle : une coupure entre les deux
+laisse la violation sur le disque.
