@@ -121,9 +121,17 @@ devient un thème du framework, sans aucune dépendance :
   en `targetSdk 36` le bord-à-bord est imposé, et sans lui la ligne de compteurs passerait
   sous la barre d'état.
 
-**Règle que je me donne** : si une ressource de thème manque à la compilation, le correctif
-est de pointer le parent vers un thème du framework (`android:Theme.*`), jamais de
-réintroduire `appcompat` ou `com.google.android.material`.
+**Règle que je me donne** : **aucun `import androidx.appcompat` dans notre code.**
+
+Et surtout pas « `appcompat` n'est pas sur le classpath » : il n'y est plus uniquement
+parce que CameraX et ML Kit sont déclarées dans le ticket qui les consomme, et `camera-view`
+le ramènera par transitivité dès SCRUM-31. La garantie est une règle de relecture, pas une
+propriété du graphe de dépendances — rien n'empêche `AppCompatActivity` de compiler, et
+l'application plante alors au lancement sur un message qui accuse le thème.
+
+Corollaire inchangé : si une ressource de thème manque à la compilation, le correctif est de
+pointer le parent vers un thème du framework (`android:Theme.*`), jamais de réintroduire
+`appcompat` ou `com.google.android.material`.
 
 ### Arborescence créée
 
