@@ -1,0 +1,81 @@
+name: CI Android
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - name: Compiler, tester et mesurer la mémoire
+        id: quality
+        shell: bash
+        run: |
+          mkdir -p ci-results
+          sudo swapoff -a
+          test "$(awk '/SwapTotal:/ {print $2}' /proc/meminfo)" -eq 0
+          {
+            printf 'Image: %s %s\n' "$ImageOS" "$ImageVersion"
+            printf 'CPU: %s\n' "$(nproc)"
+            awk '/MemTotal:|SwapTotal:/' /proc/meminfo
+            java -version 2>&1
+            cat gradle.properties
+          } | tee ci-results/environment.txt
+          printf 'seconds,available_kib,java_rss_kib\n' > ci-results/memory.csv
+          # shortcut: pics de moins de 1 s non capturés ; mesurer par cgroup si la marge devient faible.
+          (
+            while true; do
+              available_kib=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
+              java_rss_kib=$(ps -eo comm=,rss= | awk '$1 == "java" {rss += $2} END {print rss + 0}')
+              printf '%s,%s,%s\n' "$SECONDS" "$available_kib" "$java_rss_kib"
+              sleep 1
+            done
+          ) >> ci-results/memory.csv &
+          sampler_pid=$!
+          trap 'kill "$sampler_pid" 2>/dev/null || true; wait "$sampler_pid" 2>/dev/null || true' EXIT
+          bash ./gradlew clean build test lint --rerun-tasks --stacktrace | tee ci-results/build.log
+      - name: Résumer la mesure
+        if: ${{ always() && steps.quality.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          awk -F, '
+            NR == 1 {if ($0 != "seconds,available_kib,java_rss_kib") exit 1; next}
+            NR == 2 || $2 < available {available = $2}
+            $3 > java_rss {java_rss = $3}
+            END {
+              if (NR < 2) exit 1
+              printf "Mémoire disponible minimale : %.0f MiB\n", available / 1024
+              printf "Somme RSS Java maximale : %.0f MiB\n", java_rss / 1024
+              print "Échantillonnage à 1 seconde ; RSS additionnée, mémoire partagée comptée plusieurs fois."
+            }
+          ' ci-results/memory.csv | tee ci-results/summary.txt
+          cat ci-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Conserver les rapports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-ci
+          retention-days: 7
+          path: |
+            ci-results/
+            build/reports/
+            app/build/reports/
+            app/build/test-results/
