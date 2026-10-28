@@ -68,6 +68,32 @@ jobs:
             }
           ' ci-results/memory.csv | tee ci-results/summary.txt
           cat ci-results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Résoudre les dépendances Android pour Trivy
+        shell: bash
+        run: |
+          # Le catalogue Gradle seul n'est pas un inventaire exploitable par Trivy.
+          cat > "$RUNNER_TEMP/trivy-locks.init.gradle" <<'EOF'
+          allprojects {
+              configurations.matching { it.name == 'releaseRuntimeClasspath' }.configureEach {
+                  resolutionStrategy.activateDependencyLocking()
+              }
+          }
+          EOF
+          bash ./gradlew :app:dependencies --configuration releaseRuntimeClasspath --write-locks --init-script "$RUNNER_TEMP/trivy-locks.init.gradle"
+          test -s app/gradle.lockfile
+          grep -q '=releaseRuntimeClasspath' app/gradle.lockfile
+      - name: Scanner le dépôt avec Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+          skip-dirs: .git,.gradle,.kotlin,build,app/build
+          skip-files: gradle/wrapper/gradle-wrapper.jar
       - name: Conserver les rapports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -79,3 +105,4 @@ jobs:
             build/reports/
             app/build/reports/
             app/build/test-results/
+            app/gradle.lockfile
