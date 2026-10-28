@@ -2,7 +2,20 @@
 <resources>
     <!-- Nom affiché par le lanceur. -->
     <string name="app_name">BodyVision</string>
-    <!-- Texte de l’écran d’attente, distinct du nom du lanceur pour qu’un
-         renommage pour la soutenance ne change pas les deux. -->
-    <string name="startup_title">BodyVision</string>
+
+    <!-- Permission refusée, mais une explication peut encore être montrée. On dit à quoi sert
+         la caméra et ce qu'il advient des images, parce que c'est la question que se pose
+         quelqu'un qui vient de refuser. -->
+    <string name="camera_permission_denied_message">BodyVision a besoin de la caméra pour analyser votre posture pendant l’exercice. L’analyse se fait sur le téléphone : aucune image n’est enregistrée ni envoyée.</string>
+    <!-- Refus définitif : Android ne réaffichera plus la demande, seuls les réglages restent. -->
+    <string name="camera_permission_blocked_message">L’accès à la caméra est bloqué. Autorisez-le dans les réglages de l’application, puis revenez ici.</string>
+    <!-- Erreur critique : la caméra ne reviendra pas d'elle-même, d'où le bouton « Réessayer ». -->
+    <string name="camera_unavailable_message">La caméra n’est pas disponible. Une autre application l’utilise peut-être.</string>
+    <!-- Erreur récupérable, affichée en bandeau par-dessus l'aperçu. Le texte couvre les trois
+         codes récupérables, pas seulement la caméra occupée, et n'invite à aucune action :
+         CameraX réouvre tout seul. -->
+    <string name="camera_recovering_message">Caméra momentanément indisponible. L’aperçu reprend dès qu’elle se libère.</string>
+
+    <string name="action_retry">Réessayer</string>
+    <string name="action_open_settings">Ouvrir les réglages</string>
 </resources>
