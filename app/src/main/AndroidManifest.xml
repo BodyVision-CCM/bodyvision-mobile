@@ -3,9 +3,24 @@
 
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Aucune caméra n'est exigée : l'application s'installe sur un appareil qui n'en a pas
+         plutôt que d'être filtrée par le magasin. L'absence de caméra fait échouer la liaison
+         CameraX, qui aboutit à l'écran « caméra indisponible ».
+
+         Les deux dernières lignes ne sont pas redondantes avec la première : déclarer la
+         permission CAMERA fait implicitement exiger « android.hardware.camera » ET
+         « android.hardware.camera.autofocus » en required=true, et « camera.any » est un
+         troisième nom de fonctionnalité qui ne les remplace pas. Sans ces deux surcharges
+         explicites, le filtrage reste en place. -->
     <uses-feature
         android:name="android.hardware.camera.any"
-        android:required="true" />
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
 
     <application
         android:allowBackup="true"
