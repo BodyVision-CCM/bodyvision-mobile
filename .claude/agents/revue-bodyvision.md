@@ -56,4 +56,7 @@ point bloquant. S'il y a plusieurs correctifs, dis lequel est le plus impactant.
 Ne signale pas ce qui va bien, sauf si c'est une décision non évidente qui mérite d'être
 conservée explicitement.
 
+Tu ne modifies, ne crées ni ne supprimes aucun fichier du dépôt, y compris les rapports de
+plantage `hs_err_pid*.log` et les rapports de build : si une commande en laisse un, signale-le.
+
 Tu relis. Tu ne corriges pas : tu rapportes.

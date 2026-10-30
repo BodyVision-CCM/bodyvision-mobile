@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -56,6 +57,9 @@ private val PANE_MAX_WIDTH = 360.dp
 
 private val BANNER_MARGIN = 16.dp
 private val BANNER_TEXT_PADDING_HORIZONTAL = 16.dp
+private val COUNTERS_MARGIN = 16.dp
+private val COUNTERS_TEXT_PADDING_HORIZONTAL = 12.dp
+private val COUNTERS_TEXT_PADDING_VERTICAL = 6.dp
 
 /** Assez opaque pour que le texte reste lisible sur une image de caméra claire. */
 private const val BANNER_OPACITY = 0.9f
@@ -114,13 +118,21 @@ fun LiveSessionScreen(viewModel: LiveSessionViewModel = viewModel()) {
                 )
             } else {
                 // Une superposition, et non une colonne : un Box n'a pas de hauteur à répartir,
-                // donc il est indifférent à l'orientation. Les compteurs de SCRUM-32 viendront
-                // se poser ici, par-dessus l'aperçu.
+                // donc il est indifférent à l'orientation. C'est ce qui permet au bandeau et aux
+                // compteurs de se poser par-dessus l'aperçu sans lui prendre de place.
                 Box(modifier = Modifier.fillMaxSize()) {
                     CameraPreview(
+                        analysis = viewModel.frameAnalysis,
                         onCameraUnavailable = viewModel::onCameraUnavailable,
                         onCameraRecoveringChanged = viewModel::onCameraRecoveringChanged,
                         modifier = Modifier.fillMaxSize(),
+                    )
+                    // En bas et non en haut : le bandeau de reprise occupe le haut, et deux
+                    // messages superposés seraient illisibles au moment où l'un des deux compte.
+                    PoseCounters(
+                        fps = uiState.fps,
+                        landmarkCount = uiState.detectedLandmarkCount,
+                        modifier = Modifier.align(Alignment.BottomStart),
                     )
                     // Un bandeau et non un panneau : CameraPreview reste dans la composition,
                     // donc aucun unbind() ne vient interrompre la reprise que CameraX est en
@@ -144,6 +156,50 @@ fun LiveSessionScreen(viewModel: LiveSessionViewModel = viewModel()) {
                 actionLabel = stringResource(R.string.action_open_settings),
                 onAction = { context.startActivity(appSettingsIntent(context.packageName)) },
             )
+    }
+}
+
+/**
+ * Les deux chiffres de SCRUM-32, posés sur l'aperçu : images analysées par seconde et points du
+ * squelette dans la dernière pose.
+ *
+ * Publiés une fois par seconde par le `ViewModel`, donc une recomposition par seconde et non
+ * trente : c'est tout l'intérêt de ne faire passer que des scalaires par l'état.
+ */
+@Composable
+private fun PoseCounters(
+    fps: Int,
+    landmarkCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        // Bas et côtés : l'inset du haut n'ajouterait qu'un vide au-dessus d'un élément aligné
+        // en bas, et en paysage l'encoche est sur un côté.
+        modifier =
+            modifier
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+                ).padding(COUNTERS_MARGIN),
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = BANNER_OPACITY),
+        // Explicite pour la même raison que le bandeau : l'alpha empêche `Surface` de déduire
+        // la couleur du texte.
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Text(
+            text =
+                stringResource(
+                    R.string.session_counters,
+                    fps,
+                    pluralStringResource(R.plurals.session_landmark_count, landmarkCount, landmarkCount),
+                ),
+            style = MaterialTheme.typography.labelLarge,
+            modifier =
+                Modifier.padding(
+                    horizontal = COUNTERS_TEXT_PADDING_HORIZONTAL,
+                    vertical = COUNTERS_TEXT_PADDING_VERTICAL,
+                ),
+        )
     }
 }
 

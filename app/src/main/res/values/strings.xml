@@ -16,6 +16,16 @@
          CameraX réouvre tout seul. -->
     <string name="camera_recovering_message">Caméra momentanément indisponible. L’aperçu reprend dès qu’elle se libère.</string>
 
+    <!-- Les deux compteurs de SCRUM-32, posés sur l'aperçu : images analysées par seconde,
+         puis points du squelette dans la dernière pose. Une seule ligne, parce que c'est une
+         seule information : est-ce que la détection tourne, et voit-elle quelqu'un. -->
+    <string name="session_counters">%1$d FPS · %2$s</string>
+    <!-- En français 0 et 1 prennent le singulier, et 0 s'affiche dès qu'on sort du cadre. -->
+    <plurals name="session_landmark_count">
+        <item quantity="one">%d point</item>
+        <item quantity="other">%d points</item>
+    </plurals>
+
     <string name="action_retry">Réessayer</string>
     <string name="action_open_settings">Ouvrir les réglages</string>
 </resources>
