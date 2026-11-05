@@ -5,24 +5,20 @@ import com.google.mlkit.vision.pose.PoseLandmark
 import fr.upjv.bodyvision.pose.domain.NormalizedLandmark
 import fr.upjv.bodyvision.pose.domain.PoseFrame
 import fr.upjv.bodyvision.pose.domain.PoseLandmarkType
+import fr.upjv.bodyvision.pose.domain.UprightImageSize
 
 private const val NANOS_PER_MILLI = 1_000_000L
 private const val QUARTER_TURN_DEGREES = 90
 private const val THREE_QUARTER_TURN_DEGREES = 270
 
 /**
- * Taille de l'image **redressée**, c'est-à-dire telle que ML Kit la voit après la rotation
- * qu'on lui passe : c'est dans ce repère que sortent les coordonnées des landmarks, donc c'est
- * par celle-là qu'il faut diviser.
- */
-data class UprightImageSize(
-    val width: Int,
-    val height: Int,
-)
-
-/**
  * Dimensions de l'image une fois redressée : échangées pour un quart de tour, gardées pour une
  * rotation droite.
+ *
+ * « Redressée » veut dire « telle que ML Kit la voit après la rotation qu'on lui passe » : c'est
+ * dans ce repère que sortent les coordonnées des landmarks, donc c'est par celle-là qu'il faut
+ * diviser. [UprightImageSize] vit dans le domaine parce que [PoseFrame] la porte ; le lien avec
+ * la rotation d'une image de caméra, lui, reste ici.
  *
  * Rend `null` pour une image dont une dimension est nulle — ou négative, qui est la même
  * absurdité. C'est un rejet, pas une exception : le domaine rend `null` plutôt que de lever
@@ -57,8 +53,10 @@ fun uprightImageSizeOf(
  * [z] est divisé par la **largeur** et non par la hauteur : le domaine demande une profondeur
  * « dans la même échelle que x ».
  *
- * Pas de retournement de l'axe x : les coordonnées restent dans le repère de l'image. Un
- * éventuel effet miroir, si la caméra frontale arrive un jour, est une affaire d'affichage.
+ * Pas de retournement de l'axe x : les coordonnées restent dans le repère de l'image, caméra
+ * frontale comprise. Le miroir de la frontale est une affaire d'**affichage** et de rien
+ * d'autre — il vit dans la projection de l'overlay — parce que c'est l'image que la télémétrie
+ * décrit, pas ce que l'écran en montre.
  */
 fun normalizedLandmarkOf(
     x: Float,
@@ -153,5 +151,9 @@ fun Pose.toPoseFrame(
                     size = size,
                 )
         }
-    return PoseFrame(landmarks = landmarks.toMap(), timestampMs = timestampMsOf(timestampNanos))
+    return PoseFrame(
+        landmarks = landmarks.toMap(),
+        imageSize = size,
+        timestampMs = timestampMsOf(timestampNanos),
+    )
 }

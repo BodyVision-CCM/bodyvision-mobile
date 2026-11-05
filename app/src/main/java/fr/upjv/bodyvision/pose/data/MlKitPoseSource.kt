@@ -12,6 +12,7 @@ import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
 import fr.upjv.bodyvision.camera.data.FrameAnalysis
 import fr.upjv.bodyvision.pose.domain.PoseFrame
+import fr.upjv.bodyvision.pose.domain.UprightImageSize
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow

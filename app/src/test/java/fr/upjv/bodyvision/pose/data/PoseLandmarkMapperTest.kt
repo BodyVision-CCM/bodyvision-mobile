@@ -2,6 +2,7 @@ package fr.upjv.bodyvision.pose.data
 
 import com.google.mlkit.vision.pose.PoseLandmark
 import fr.upjv.bodyvision.pose.domain.PoseLandmarkType
+import fr.upjv.bodyvision.pose.domain.UprightImageSize
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue

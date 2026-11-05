@@ -6,6 +6,16 @@ import org.junit.Test
 
 private const val DELTA = 0.01
 
+/**
+ * Image **carrée** à dessein, et c'est le seul changement que ce ticket apporte aux tests
+ * existants.
+ *
+ * Les angles attendus ci-dessous ont été calculés à la main dans un repère isotrope, où une unité
+ * de x vaut une unité de y. Les déclarer dans une image carrée les garde donc exacts à la
+ * virgule près, sans qu'aucune valeur attendue ne bouge.
+ */
+private val SQUARE_IMAGE = UprightImageSize(width = 640, height = 640)
+
 class PoseGeometryTest {
     @Test
     fun `un angle droit vaut 90 degres`() {
@@ -158,7 +168,11 @@ class PoseGeometryTest {
 
     @Test
     fun `une pose sans aucun point rend null`() {
-        assertNull(rawRightKneeAngle(PoseFrame(landmarks = emptyMap(), timestampMs = 0L)))
+        assertNull(
+            rawRightKneeAngle(
+                PoseFrame(landmarks = emptyMap(), imageSize = SQUARE_IMAGE, timestampMs = 0L),
+            ),
+        )
     }
 }
 
@@ -168,6 +182,7 @@ private fun poseWith(vararg points: Pair<PoseLandmarkType, Pair<Float, Float>>):
             points.associate { (type, position) ->
                 type to NormalizedLandmark(x = position.first, y = position.second, z = 0f, visibility = 1f)
             },
+        imageSize = SQUARE_IMAGE,
         timestampMs = 0L,
     )
 
