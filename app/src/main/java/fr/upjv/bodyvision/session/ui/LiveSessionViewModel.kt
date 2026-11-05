@@ -3,11 +3,14 @@ package fr.upjv.bodyvision.session.ui
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import fr.upjv.bodyvision.camera.data.CameraLens
 import fr.upjv.bodyvision.camera.data.FrameAnalysis
 import fr.upjv.bodyvision.pose.data.MlKitPoseSource
+import fr.upjv.bodyvision.pose.domain.PoseFrame
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -19,6 +22,7 @@ import kotlin.math.roundToInt
 
 private const val HAS_BEEN_ASKED_ONCE_KEY = "hasBeenAskedOnce"
 private const val AMBIGUOUS_DENIAL_COUNT_KEY = "ambiguousDenialCount"
+private const val LENS_KEY = "lens"
 
 /** Un battement par seconde : c'est le rythme auquel un œil lit deux nombres. */
 private const val COUNTER_PERIOD_MS = 1_000L
@@ -58,6 +62,25 @@ class LiveSessionViewModel(
 
     /** Passé à `CameraPreview`, qui le transmet à la liaison caméra. */
     val frameAnalysis: FrameAnalysis = poseSource.frameAnalysis
+
+    /**
+     * Les poses, pour l'overlay, et **hors de l'état d'écran** : trente publications d'état par
+     * seconde recomposeraient tout l'écran pour des chiffres qu'un œil lit une fois par seconde.
+     * Le flux de la source est exposé tel quel ; c'est l'overlay qui le collecte en respectant le
+     * cycle de vie.
+     */
+    val poseFrames: SharedFlow<PoseFrame> = poseSource.frames
+
+    /**
+     * Les objectifs que l'appareil offre réellement, tels que l'écran les a demandés à CameraX.
+     *
+     * Champ ordinaire et non [SavedStateHandle] : c'est une propriété de l'appareil, redemandée à
+     * chaque entrée dans l'écran, et l'enregistrer serait garder une réponse qui peut être
+     * fausse. Vide tant qu'on ne sait pas, ce qui n'est pas la même chose que « aucun objectif ».
+     *
+     * Lu et écrit sur le thread principal seulement.
+     */
+    private var availableLenses: Set<CameraLens> = emptySet()
 
     /**
      * **L'état source**, et la seule chose que la logique interne lit. [uiState] en est dérivé
@@ -129,6 +152,26 @@ class LiveSessionViewModel(
         }
 
     /**
+     * L'objectif **choisi**, au même endroit que [hasBeenAskedOnce] et pour la même raison : il
+     * doit survivre à la rotation, qui détruit l'activité, et à la mort du processus en
+     * arrière-plan. Un `remember` ne ferait ni l'un ni l'autre.
+     *
+     * Enregistré par son nom et relu par comparaison de nom, sans `valueOf` : un état restauré
+     * qui porterait un nom inconnu — un enum renommé entre deux versions — est un cas normal, et
+     * il se traite par un repli sur l'arrière, pas par une exception au démarrage.
+     *
+     * Distinct de l'objectif **effectif** publié dans l'état : voir [resolveCameraLens].
+     */
+    private var chosenLens: CameraLens
+        get() {
+            val savedName: String? = savedStateHandle[LENS_KEY]
+            return CameraLens.entries.firstOrNull { it.name == savedName } ?: CameraLens.BACK
+        }
+        set(value) {
+            savedStateHandle[LENS_KEY] = value.name
+        }
+
+    /**
      * Vrai dès qu'une demande a été envoyée depuis cet écran.
      *
      * Champ ordinaire et non [SavedStateHandle], parce que sa portée n'est pas celle de
@@ -194,6 +237,87 @@ class LiveSessionViewModel(
         onPermissionStateObserved(isGranted, canShowRationale)
     }
 
+    /**
+     * Les objectifs de l'appareil, demandés par l'écran — `hasCamera` exige CameraX, donc un
+     * `Context`, que ce `ViewModel` n'a pas et ne doit pas avoir.
+     *
+     * Un choix enregistré qui n'existe pas sur cet appareil est corrigé **durablement** ici : le
+     * prochain lancement n'a pas à refaire le détour. Tant que l'ensemble est vide, en revanche,
+     * rien n'est réécrit — on ne sait pas encore, et effacer le choix de quelqu'un sur une
+     * ignorance momentanée le détruirait à chaque lancement.
+     */
+    fun onAvailableLensesObserved(lenses: Set<CameraLens>) {
+        availableLenses = lenses
+        if (lenses.isEmpty()) {
+            // La réponse est arrivée, et elle est vide : aucun objectif à lier. C'est le seul cas
+            // où « pas d'objectif » veut bien dire « caméra indisponible », et il faut le dire —
+            // sans ça, l'écran attendrait un objectif qui ne viendra jamais, noir et muet. En
+            // pratique : fournisseur CameraX qui ne s'initialise pas, ou caméras désactivées par
+            // politique d'appareil.
+            onCameraUnavailable()
+            return
+        }
+        // Ce qui est réécrit est l'objectif **réellement retenu**, et non la constante `BACK` :
+        // sur un appareil sans caméra arrière, enregistrer `BACK` mettrait une valeur fausse dans
+        // le `SavedStateHandle`, qu'il faudrait rattraper à chaque lecture. Rien n'est réécrit
+        // tant que l'ensemble est vide — on ne sait pas encore, et effacer le choix de quelqu'un
+        // sur une ignorance momentanée le détruirait à chaque lancement.
+        val resolvedLens = resolveCameraLens(chosenLens, lenses)
+        if (resolvedLens != null && resolvedLens != chosenLens) chosenLens = resolvedLens
+        publishLens()
+    }
+
+    /**
+     * Passe à l'autre objectif. Sans effet si l'appareil ne l'a pas — le bouton n'est alors même
+     * pas proposé, et cette garde est là pour que la règle tienne sans dépendre de l'écran.
+     *
+     * Rien n'est oublié ici, et c'est délibéré : au moment du toucher, l'ancienne caméra est
+     * encore liée et peut encore livrer une image. C'est [onCameraUnbound] qui s'en charge, une
+     * fois la liaison défaite.
+     */
+    fun onLensToggled() {
+        val currentLens = resolveCameraLens(chosenLens, availableLenses) ?: return
+        val nextLens = if (currentLens == CameraLens.BACK) CameraLens.FRONT else CameraLens.BACK
+        if (nextLens !in availableLenses) return
+        chosenLens = nextLens
+        publishLens()
+    }
+
+    /**
+     * Une liaison caméra vient d'être défaite : bascule d'objectif, rotation, ou simple sortie de
+     * l'écran.
+     *
+     * C'est le seul moment où plus aucune image de cette liaison ne peut être livrée, donc le
+     * bon moment pour oublier les poses en cours : la dernière décrit un objectif ou une rotation
+     * d'image qui ne sont plus à l'écran, et le `replay = 1` du flux la servirait au prochain
+     * collecteur.
+     */
+    fun onCameraUnbound() {
+        poseSource.discardPendingFrames()
+    }
+
+    // Ordre dont dépend la bascule, et il mérite d'être écrit : au changement d'objectif, cet
+    // appel doit avoir lieu **avant** que l'effet de collecte de l'overlay ne redémarre, sinon le
+    // nouveau collecteur serait servi par un cache de rejeu encore plein et dessinerait la pose de
+    // l'ancien objectif, en miroir. Compose le garantit — il dispatche tous ses `onForgotten`
+    // avant tous ses `onRemembered`, et un `LaunchedEffect` lance sa coroutine au lieu de
+    // l'exécuter — mais c'est un détail de son runtime, pas un contrat. D'où la vérification sur
+    // appareil, qui est le seul vrai garde-fou.
+
+    /**
+     * L'écran passe en arrière-plan, ou l'écran s'éteint.
+     *
+     * C'est la discontinuité la plus fréquente de toutes, et la seule qui ne défait **pas** la
+     * liaison : `CameraPreview` reste dans la composition, donc aucun `onDispose` ne vient
+     * oublier la dernière pose. CameraX, lui, libère la caméra par son propre observateur de
+     * cycle de vie, et il lui faut quelques centaines de millisecondes pour livrer une image au
+     * retour — la pose d'avant la veille serait dessinée pendant tout ce temps, et elle peut
+     * avoir dix minutes.
+     */
+    fun onScreenStopped() {
+        poseSource.discardPendingFrames()
+    }
+
     fun onCameraUnavailable() {
         // Le bandeau d'attente n'a plus de sens : on ne montre plus l'aperçu derrière.
         mutableUiState.update { it.copy(isCameraUnavailable = true, isCameraRecovering = false) }
@@ -210,12 +334,25 @@ class LiveSessionViewModel(
      * pour rien.
      */
     fun onCameraRecoveringChanged(isRecovering: Boolean) {
+        // Sur la transition seulement, pas à chaque appel : l'aperçu se figeant, la dernière pose
+        // décrit une image que la caméra ne voit plus, et le `replay = 1` la servirait à l'overlay
+        // dès son retour.
+        if (isRecovering && !mutableUiState.value.isCameraRecovering) poseSource.discardPendingFrames()
         mutableUiState.update { it.copy(isCameraRecovering = isRecovering) }
     }
 
     /** Ferme la chaîne que ce `ViewModel` possède : détecteur ML Kit, puis exécuteur. */
     override fun onCleared() {
         poseSource.close()
+    }
+
+    private fun publishLens() {
+        mutableUiState.update {
+            it.copy(
+                lens = resolveCameraLens(chosenLens, availableLenses),
+                isLensSwitchAvailable = availableLenses.size > 1,
+            )
+        }
     }
 
     /**

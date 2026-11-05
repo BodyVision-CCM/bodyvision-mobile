@@ -26,6 +26,14 @@
         <item quantity="other">%d points</item>
     </plurals>
 
+    <!-- Bascule d'objectif (SCRUM-36). Le libellé nomme l'objectif vers lequel on va, la
+         description reprend l'action entière : un lecteur d'écran annonce le bouton hors de son
+         contexte visuel, où « Caméra frontale » pourrait passer pour un état. -->
+    <string name="action_use_front_camera">Caméra frontale</string>
+    <string name="action_use_back_camera">Caméra arrière</string>
+    <string name="action_use_front_camera_description">Basculer vers la caméra frontale</string>
+    <string name="action_use_back_camera_description">Basculer vers la caméra arrière</string>
+
     <string name="action_retry">Réessayer</string>
     <string name="action_open_settings">Ouvrir les réglages</string>
 </resources>

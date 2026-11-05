@@ -1,5 +1,7 @@
 package fr.upjv.bodyvision.session.ui
 
+import fr.upjv.bodyvision.camera.data.CameraLens
+
 /**
  * Tout ce que l'écran de session affiche, et rien d'autre.
  *
@@ -9,6 +11,26 @@ package fr.upjv.bodyvision.session.ui
  */
 data class LiveSessionUiState(
     val permission: CameraPermissionStatus = CameraPermissionStatus.UNKNOWN,
+    /**
+     * L'objectif à lier, et celui dont l'aperçu est affiché. `null` tant que les objectifs de
+     * l'appareil ne sont pas connus.
+     *
+     * Ce `null` est un état, pas un oubli d'initialisation : l'écran n'affiche alors rien et ne
+     * lie aucune caméra. Partir de [CameraLens.BACK] « en attendant » ferait un battement de
+     * caméra arrière à chaque lancement pour qui a choisi la frontale, et un écran « caméra
+     * indisponible » sur un appareil sans caméra arrière — pour une absence d'objectif, pas pour
+     * une panne. C'est [resolveCameraLens] qui le décide.
+     *
+     * C'est aussi lui qui décide du miroir de l'overlay, parce que c'est lui qui est lié : les
+     * coordonnées des poses, elles, restent dans le repère de l'image.
+     */
+    val lens: CameraLens? = null,
+    /**
+     * Vrai seulement quand l'appareil a les deux objectifs. Faux tant qu'on ne le sait pas
+     * encore, parce qu'un bouton qui apparaît puis disparaît est pire qu'un bouton qui arrive
+     * une fraction de seconde après l'aperçu.
+     */
+    val isLensSwitchAvailable: Boolean = false,
     /**
      * Vrai quand la caméra est durablement inutilisable : la liaison a échoué, ou CameraX a
      * signalé une erreur critique. C'est bien un état et non un message ponctuel :
