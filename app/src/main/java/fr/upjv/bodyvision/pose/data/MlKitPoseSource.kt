@@ -13,6 +13,7 @@ import com.google.mlkit.vision.pose.PoseDetection
 import fr.upjv.bodyvision.camera.data.FrameAnalysis
 import fr.upjv.bodyvision.pose.domain.PoseFrame
 import fr.upjv.bodyvision.pose.domain.UprightImageSize
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -84,6 +85,12 @@ class MlKitPoseSource {
     /** Garde d'idempotence de [close] : le deuxième appel ne fait rien. */
     private val isCloseRequested = AtomicBoolean(false)
 
+    /**
+     * Change à chaque discontinuité du flux caméra, et c'est [discardPendingFrames] qui l'avance.
+     * Atomique parce qu'il est avancé sur le thread principal et lu sur l'exécuteur d'analyse.
+     */
+    private val generation = AtomicInteger(0)
+
     /** Lu par le `ViewModel`, sur un autre thread que l'analyse, d'où l'atomique. */
     private val analyzedFrameCount = AtomicInteger(0)
 
@@ -112,8 +119,9 @@ class MlKitPoseSource {
      * affectation pour décider s'il publie, soit une comparaison de map de 33 entrées 30 fois
      * par seconde, pour un résultat toujours faux.
      *
-     * **Personne ne le collecte en S3**, et c'est normal : la preuve que les landmarks
-     * arrivent, c'est le compteur à l'écran.
+     * Collecté par l'overlay depuis SCRUM-36, et par lui seul : les compteurs à l'écran, eux,
+     * passent par l'état de l'écran. Une pose dont la liaison caméra a changé entre temps n'est
+     * pas émise — voir [discardPendingFrames].
      */
     val frames: SharedFlow<PoseFrame> = mutableFrames.asSharedFlow()
 
@@ -129,6 +137,32 @@ class MlKitPoseSource {
      * dit. C'est le `ViewModel` qui en fait un FPS, à son battement d'une seconde.
      */
     fun consumeAnalyzedFrameCount(): Int = analyzedFrameCount.getAndSet(0)
+
+    /**
+     * Oublie la dernière pose publiée, et n'émettra pas celles dont l'inférence a commencé avant
+     * cet appel. À appeler à chaque **discontinuité** du flux caméra : liaison défaite — bascule
+     * d'objectif ou rotation — et entrée en reprise caméra.
+     *
+     * Le `replay = 1` de [frames] sert à survivre à une recomposition, jamais à une
+     * discontinuité : sans cet oubli, un collecteur qui redémarre après une bascule recevrait
+     * aussitôt la dernière pose de l'**ancien** objectif, et l'overlay la dessinerait en miroir
+     * par-dessus la nouvelle caméra — un squelette faux et immobile, jusqu'à la première pose du
+     * nouvel objectif.
+     *
+     * À appeler **après** que la liaison a été défaite, et non au moment où l'utilisateur
+     * demande la bascule : tant que l'ancienne caméra est liée, une image peut encore être
+     * livrée, et elle démarrerait avec la nouvelle génération.
+     *
+     * `resetReplayCache` est marqué expérimental dans kotlinx.coroutines et n'a pas d'équivalent
+     * stable : il n'y a pas d'autre façon de vider un cache de rejeu. L'annotation est écrite en
+     * nom complet parce que ce fichier importe déjà l'`OptIn` d'androidx, pour
+     * `ExperimentalGetImage`, et que les deux ne sont pas interchangeables.
+     */
+    @kotlin.OptIn(ExperimentalCoroutinesApi::class)
+    fun discardPendingFrames() {
+        generation.incrementAndGet()
+        mutableFrames.resetReplayCache()
+    }
 
     /**
      * Ferme le détecteur et arrête l'exécuteur, **depuis l'exécuteur lui-même**.
@@ -175,6 +209,11 @@ class MlKitPoseSource {
             return
         }
 
+        // La génération au moment où cette image est prise en charge. Si une discontinuité
+        // survient pendant l'inférence, la pose qui en sort décrira une image que l'aperçu ne
+        // montre plus : elle est comptée, mais pas émise.
+        val frameGeneration = generation.get()
+
         // Le portillon est pris et aucun `close()` n'est encore programmé : c'est la seule
         // fenêtre du fichier où une levée laisserait le portillon fermé pour toujours et l'image
         // jamais rendue au pool de CameraX, c'est-à-dire un aperçu gelé sans aucun message.
@@ -202,11 +241,16 @@ class MlKitPoseSource {
             // par seconde.
             .addOnSuccessListener(analysisExecutor) { pose ->
                 val frame = pose.toPoseFrame(inference.size, inference.timestampNanos)
-                lastLandmarkCount = frame.landmarks.size
                 // Compté avant l'émission, comme `onFrameAnalyzed` dans le spike : ce chiffre
                 // doit rester comparable aux 29,4 FPS de SCRUM-22, qui comptaient les succès de
-                // `process()` et non ce qui survit à un tampon.
+                // `process()` et non ce qui survit à un tampon. Une image écartée ci-dessous
+                // reste comptée ici : elle a bien été analysée, et retirer son tour ferait
+                // mentir le débit.
                 analyzedFrameCount.incrementAndGet()
+                if (frameGeneration != generation.get()) return@addOnSuccessListener
+                // Le compte de points suit la pose, lui, et pas l'image : publier celui d'une
+                // pose écartée afficherait pendant une seconde les points de l'ancien objectif.
+                lastLandmarkCount = frame.landmarks.size
                 // `tryEmit` et non une coroutine par image : avec `replay = 1` et
                 // `DROP_OLDEST`, il réussit toujours et ne suspend jamais.
                 mutableFrames.tryEmit(frame)

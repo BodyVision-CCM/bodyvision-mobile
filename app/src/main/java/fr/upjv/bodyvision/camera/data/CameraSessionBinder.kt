@@ -6,21 +6,32 @@ import android.util.Log
 import android.util.Size
 import android.view.Display
 import androidx.camera.core.Camera
-import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Observer
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 private const val TAG = "CameraSessionBinder"
 
 /** Résolution d'analyse mesurée et figée en SCRUM-22 : 29,4 FPS, latence médiane 26,4 ms. */
 private val ANALYSIS_RESOLUTION = Size(640, 480)
+
+/**
+ * De quoi distinguer deux rapports d'aspect sans se faire piéger par l'arrondi : 4:3 vaut 1,333
+ * et 16:9 vaut 1,778, donc tout écart réel est cent fois plus grand que ce seuil.
+ */
+private const val ASPECT_RATIO_TOLERANCE = 0.01f
 
 /**
  * Lie et délie les cas d'usage CameraX. Reprend la configuration mesurée du spike SCRUM-22.
@@ -34,6 +45,15 @@ class CameraSessionBinder(
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var displayListener: DisplayManager.DisplayListener? = null
+
+    /**
+     * L'état de la caméra **de la liaison courante**, et son observateur.
+     *
+     * Gardés tous les deux parce qu'il faut l'un pour retirer l'autre. Le cycle de vie ne suffit
+     * pas : voir [watchCameraState].
+     */
+    private var cameraState: LiveData<CameraState>? = null
+    private var cameraStateObserver: Observer<CameraState>? = null
 
     /**
      * Identifie la demande de liaison courante. Le fournisseur de caméra arrive de façon
@@ -64,6 +84,9 @@ class CameraSessionBinder(
      * Le détail de la panne va dans le logcat, que l'écran ne peut pas montrer ; l'écran n'a
      * besoin de savoir que « indisponible », d'où un rappel sans paramètre.
      *
+     * [lens] est l'objectif à lier. C'est un paramètre et non une constante parce que la bascule
+     * arrière/frontale refait la liaison : l'appelant délie, puis relie avec l'autre objectif.
+     *
      * [displayProvider] rend l'affichage **de la vue d'aperçu**, et non un affichage par défaut :
      * c'est celui que `PreviewView` suit, donc le seul qui aligne l'analyse sur ce qui est affiché.
      * Une fonction et non une valeur, parce que la réponse change : elle est nulle tant que la vue
@@ -72,6 +95,7 @@ class CameraSessionBinder(
     fun bind(
         lifecycleOwner: LifecycleOwner,
         surfaceProvider: Preview.SurfaceProvider,
+        lens: CameraLens,
         displayProvider: () -> Display?,
         analysis: FrameAnalysis? = null,
         onUnavailable: () -> Unit,
@@ -88,6 +112,7 @@ class CameraSessionBinder(
                     provider,
                     lifecycleOwner,
                     surfaceProvider,
+                    lens,
                     displayProvider,
                     analysis,
                     onUnavailable,
@@ -96,7 +121,7 @@ class CameraSessionBinder(
             } catch (e: Exception) {
                 // Rattrapée parce qu'on sait quoi en faire : l'écran propose de réessayer.
                 val requested = if (analysis == null) "aperçu seul" else "aperçu et analyse"
-                Log.e(TAG, "Liaison CameraX impossible (caméra arrière, $requested)", e)
+                Log.e(TAG, "Liaison CameraX impossible (objectif $lens, $requested)", e)
                 onUnavailable()
             }
         }, ContextCompat.getMainExecutor(context))
@@ -106,6 +131,7 @@ class CameraSessionBinder(
         // Invalide la demande en vol, s'il y en a une.
         currentBindToken++
         unregisterDisplayListener()
+        unobserveCameraState()
         imageAnalysis?.clearAnalyzer()
         imageAnalysis = null
         cameraProvider?.unbindAll()
@@ -116,6 +142,7 @@ class CameraSessionBinder(
         provider: ProcessCameraProvider,
         lifecycleOwner: LifecycleOwner,
         surfaceProvider: Preview.SurfaceProvider,
+        lens: CameraLens,
         displayProvider: () -> Display?,
         analysis: FrameAnalysis?,
         onUnavailable: () -> Unit,
@@ -123,7 +150,7 @@ class CameraSessionBinder(
     ) {
         provider.unbindAll()
 
-        val preview = Preview.Builder().build().also { it.surfaceProvider = surfaceProvider }
+        val preview = newPreview(surfaceProvider)
         val newAnalysis = analysis?.let(::newImageAnalysis)
         imageAnalysis = newAnalysis
 
@@ -131,18 +158,100 @@ class CameraSessionBinder(
         val camera =
             provider.bindToLifecycle(
                 lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                lens.toCameraSelector(),
                 *useCases.toTypedArray(),
             )
 
         watchCameraState(camera, lifecycleOwner, onUnavailable, onRecoveringChanged)
         newAnalysis?.let { trackDisplayRotation(it, displayProvider) }
+        logBoundUseCases(lens, preview, newAnalysis)
     }
 
     /**
-     * Seule source qui réponde à « la caméra est-elle réellement ouverte ». Observée avec le
-     * [lifecycleOwner] et non manuellement : LiveData se désabonne alors tout seul quand
-     * l'écran est détruit, donc rien à retirer dans [unbind].
+     * L'aperçu, avec son format **écrit explicitement**.
+     *
+     * Les deux stratégies reproduisent à l'identique `Preview.Defaults` de CameraX 1.4.2 — 4:3
+     * avec repli automatique, et la plus haute résolution disponible — donc le comportement ne
+     * change pas, il devient seulement lisible. Ne poser que l'`AspectRatioStrategy` ne serait
+     * pas équivalent : le sélecteur est une **option unique** de la configuration, celui de
+     * l'application remplace celui du défaut, et `HIGHEST_AVAILABLE_STRATEGY` disparaîtrait en
+     * silence.
+     *
+     * Pourquoi l'écrire du tout : la projection de l'overlay n'est juste que si l'aperçu et
+     * l'analyse couvrent la même zone du capteur, donc partagent le même rapport d'aspect. C'est
+     * une hypothèse de l'affichage, elle doit se lire ici et pas seulement dans les sources de
+     * CameraX.
+     */
+    private fun newPreview(surfaceProvider: Preview.SurfaceProvider): Preview {
+        val resolutionSelector =
+            ResolutionSelector
+                .Builder()
+                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                .build()
+
+        return Preview
+            .Builder()
+            .setResolutionSelector(resolutionSelector)
+            .build()
+            .also { it.surfaceProvider = surfaceProvider }
+    }
+
+    /**
+     * Une ligne par liaison — à l'ouverture, à chaque rotation, à chaque bascule — et jamais par
+     * image.
+     *
+     * Elle existe pour une raison précise : `RATIO_4_3_FALLBACK_AUTO_STRATEGY` autorise un autre
+     * rapport d'aspect quand le 4:3 n'est pas disponible, et deux rapports différents veulent dire
+     * deux zones du capteur différentes. Ce cas passe donc en avertissement et s'annonce lui-même,
+     * au lieu de laisser deux résolutions à comparer de tête.
+     *
+     * Attention à ce qu'elle prouve, et à ce qu'elle ne prouve pas : un rapport identique est une
+     * condition **nécessaire** pour que les deux cas d'usage couvrent la même zone, pas une
+     * condition suffisante. La ligne rapporte donc ce qu'elle a lu, et laisse le diagnostic à qui
+     * la lit.
+     *
+     * `resolutionInfo` est nullable — la liaison vient tout juste d'être faite — et il est lu
+     * sans `!!` : une résolution manquante se journalise telle quelle, sans comparaison.
+     */
+    private fun logBoundUseCases(
+        lens: CameraLens,
+        preview: Preview,
+        analysis: ImageAnalysis?,
+    ) {
+        val previewResolution = preview.resolutionInfo?.resolution
+        val analysisResolution = analysis?.resolutionInfo?.resolution
+        val details = "objectif $lens, aperçu $previewResolution, analyse $analysisResolution"
+
+        val previewRatio = previewResolution?.sideRatio()
+        val analysisRatio = analysisResolution?.sideRatio()
+        val isAspectRatioMismatch =
+            previewRatio != null &&
+                analysisRatio != null &&
+                abs(previewRatio - analysisRatio) > ASPECT_RATIO_TOLERANCE
+
+        if (isAspectRatioMismatch) {
+            Log.w(
+                TAG,
+                "Rapports d'aspect différents entre l'aperçu et l'analyse ($details) : " +
+                    "premier suspect si le squelette est décalé",
+            )
+        } else {
+            Log.i(TAG, "Liaison faite ($details)")
+        }
+    }
+
+    /**
+     * Seule source qui réponde à « la caméra est-elle réellement ouverte ».
+     *
+     * Observée avec le [lifecycleOwner], qui couvre la destruction de l'écran, **et retirée
+     * explicitement dans [unbind]**. Les deux sont nécessaires, et c'est la bascule d'objectif
+     * qui l'a rendu vrai : jusqu'ici, relier sans détruire l'activité était rare. Chaque
+     * bascule laisserait sinon un observateur définitif sur l'état de l'objectif qu'on vient de
+     * quitter — et cet état continue de vivre. L'objectif arrière libre repasse en
+     * `PENDING_OPEN`, sans erreur ; l'observateur périmé y lirait « tout va bien » et ferait
+     * disparaître le bandeau de reprise de la **frontale**, qui serait toujours indisponible.
+     * Un observateur d'un objectif ne doit pas pouvoir parler de l'état d'un autre.
      *
      * **Deux conduites opposées, et c'est CameraX qui tranche.** Il classe lui-même ses codes
      * en `RECOVERABLE` (caméra occupée, trop de caméras ouvertes, autre panne temporaire) et
@@ -170,24 +279,40 @@ class CameraSessionBinder(
         onUnavailable: () -> Unit,
         onRecoveringChanged: (Boolean) -> Unit,
     ) {
-        camera.cameraInfo.cameraState.observe(lifecycleOwner) { state ->
-            val error = state.error
-            if (error == null) {
-                val isBackOnTrack =
-                    state.type == CameraState.Type.OPEN || state.type == CameraState.Type.PENDING_OPEN
-                if (isBackOnTrack) onRecoveringChanged(false)
-                return@observe
+        // Celui d'une liaison précédente parlerait de l'état d'un objectif qu'on ne regarde plus.
+        unobserveCameraState()
+
+        val observer =
+            Observer<CameraState> { state ->
+                val error = state.error
+                if (error == null) {
+                    val isBackOnTrack =
+                        state.type == CameraState.Type.OPEN || state.type == CameraState.Type.PENDING_OPEN
+                    if (isBackOnTrack) onRecoveringChanged(false)
+                    return@Observer
+                }
+
+                val details = "code ${error.code}, type ${error.type}, phase ${state.type}"
+                if (error.type == CameraState.ErrorType.CRITICAL) {
+                    Log.e(TAG, "Caméra fermée sur erreur critique ($details)", error.cause)
+                    onUnavailable()
+                } else {
+                    Log.w(TAG, "Caméra en erreur récupérable, CameraX réouvrira ($details)", error.cause)
+                    onRecoveringChanged(true)
+                }
             }
 
-            val details = "code ${error.code}, type ${error.type}, phase ${state.type}"
-            if (error.type == CameraState.ErrorType.CRITICAL) {
-                Log.e(TAG, "Caméra fermée sur erreur critique ($details)", error.cause)
-                onUnavailable()
-            } else {
-                Log.w(TAG, "Caméra en erreur récupérable, CameraX réouvrira ($details)", error.cause)
-                onRecoveringChanged(true)
-            }
-        }
+        cameraState = camera.cameraInfo.cameraState
+        cameraStateObserver = observer
+        camera.cameraInfo.cameraState.observe(lifecycleOwner, observer)
+    }
+
+    /** Idempotente : sans observateur enregistré, elle ne fait rien. */
+    private fun unobserveCameraState() {
+        val observer = cameraStateObserver ?: return
+        cameraState?.removeObserver(observer)
+        cameraStateObserver = null
+        cameraState = null
     }
 
     private fun newImageAnalysis(analysis: FrameAnalysis): ImageAnalysis {
@@ -305,3 +430,9 @@ class CameraSessionBinder(
         displayListener = null
     }
 }
+
+/**
+ * Grand côté sur petit côté : comparé dans ce sens, l'orientation du tampon ne fait pas passer un
+ * 4:3 et un 3:4 pour deux rapports différents.
+ */
+private fun Size.sideRatio(): Float = max(width, height).toFloat() / min(width, height)
