@@ -376,10 +376,15 @@ class CameraSessionBinder(
      * `OrientationEventListener`, justement parce que l'orientation d'affichage peut être
      * verrouillée. Le conseil vaut pour qui ne fait que de l'analyse ; ici un overlay se superpose
      * à l'aperçu, et deux repères différents donneraient un squelette faux dans tous les cas, y
-     * compris les plus courants. La contrepartie est assumée et écrite dans `docs/plan-s4.md` :
-     * rotation automatique désactivée et appareil tourné, ML Kit reçoit un sujet couché et ne
-     * détecte plus — une détection qui tombe se voit, un squelette décalé se présente comme une
-     * mesure.
+     * compris les plus courants. La contrepartie est écrite dans `docs/plan-s4.md`, et elle est
+     * plus légère que prévu : rotation automatique coupée et appareil tourné d'un quart de tour,
+     * ML Kit détecte bien la personne — couchée, comme la scène — et le squelette reste posé sur
+     * son corps. Vérifié sur le Honor 400 le 05/11/2026.
+     *
+     * Ce qui reste : les coordonnées sont alors exprimées dans le repère de l'**écran** et non
+     * dans celui de la **gravité**. Sans effet sur un angle entre deux segments, qui ne dépend pas
+     * de la rotation du repère ; faux pour une inclinaison mesurée par rapport à la verticale.
+     * Suite dans SCRUM-113.
      */
     private fun trackDisplayRotation(
         analysis: ImageAnalysis,
