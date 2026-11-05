@@ -12,7 +12,8 @@ private const val DELTA = 0.01
  *
  * Les angles attendus ci-dessous ont été calculés à la main dans un repère isotrope, où une unité
  * de x vaut une unité de y. Les déclarer dans une image carrée les garde donc exacts à la
- * virgule près, sans qu'aucune valeur attendue ne bouge.
+ * virgule près, sans qu'aucune valeur attendue ne bouge. L'anisotropie, elle, a son propre test :
+ * celui qui donne une image 480x640 à des segments obliques.
  */
 private val SQUARE_IMAGE = UprightImageSize(width = 640, height = 640)
 
@@ -174,15 +175,43 @@ class PoseGeometryTest {
             ),
         )
     }
+
+    @Test
+    fun `un angle droit oblique vaut 90 degres dans une image non carree`() {
+        // Sommet au centre d'une image 480x640, les deux autres points à (+100, +100) et
+        // (+100, -100) pixels de lui : 90° vrais, par construction.
+        //
+        // C'est le test qui échoue sur la version qui faisait son atan2 sur des x divisés par 480
+        // et des y divisés par 640 : les deux segments y paraissaient à ±36,87° de l'horizontale
+        // au lieu de ±45°, et la fonction rendait 73,74°. Les angles des tests précédents, eux,
+        // sont alignés sur les axes ou calculés dans un repère carré, donc insensibles au défaut.
+        val vertical = 100f / 640f
+        val horizontal = 100f / 480f
+        val pose =
+            poseIn(
+                UprightImageSize(width = 480, height = 640),
+                PoseLandmarkType.RIGHT_HIP to (0.5f + horizontal to 0.5f + vertical),
+                PoseLandmarkType.RIGHT_KNEE to (0.5f to 0.5f),
+                PoseLandmarkType.RIGHT_ANKLE to (0.5f + horizontal to 0.5f - vertical),
+            )
+
+        assertEquals(90.0, rightKneeAngle(pose), DELTA)
+    }
 }
 
 private fun poseWith(vararg points: Pair<PoseLandmarkType, Pair<Float, Float>>): PoseFrame =
+    poseIn(SQUARE_IMAGE, *points)
+
+private fun poseIn(
+    imageSize: UprightImageSize,
+    vararg points: Pair<PoseLandmarkType, Pair<Float, Float>>,
+): PoseFrame =
     PoseFrame(
         landmarks =
             points.associate { (type, position) ->
                 type to NormalizedLandmark(x = position.first, y = position.second, z = 0f, visibility = 1f)
             },
-        imageSize = SQUARE_IMAGE,
+        imageSize = imageSize,
         timestampMs = 0L,
     )
 
