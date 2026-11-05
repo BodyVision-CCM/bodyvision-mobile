@@ -14,6 +14,9 @@ import fr.upjv.bodyvision.camera.data.FrameAnalysis
 /**
  * Aperçu de la caméra arrière.
  *
+ * C'est aussi d'ici que vient l'affichage sur lequel la liaison aligne la rotation de l'analyse :
+ * la `PreviewView` est le seul objet qui sache sur quel écran elle est posée.
+ *
  * `PreviewView` est une `View` de l'ancien monde : [AndroidView] est le pont qui la pose dans
  * un arbre Compose. Le [DisposableEffect] est ce qui donne à la liaison la même durée de vie
  * que le composable — elle est faite quand il entre dans la composition et défaite quand il en
@@ -40,6 +43,10 @@ fun CameraPreview(
         binder.bind(
             lifecycleOwner = lifecycleOwner,
             surfaceProvider = previewView.surfaceProvider,
+            // L'affichage de la vue, relu à chaque fois : il est nul tant que la vue n'est pas
+            // attachée à une fenêtre, et c'est celui-là que `PreviewView` suit pour orienter
+            // l'aperçu.
+            displayProvider = { previewView.display },
             analysis = analysis,
             onUnavailable = onCameraUnavailable,
             onRecoveringChanged = onCameraRecoveringChanged,
