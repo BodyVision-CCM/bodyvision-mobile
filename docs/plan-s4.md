@@ -366,13 +366,13 @@ Puis, sur le Honor 400, appareil physique uniquement :
 
 - squelette posé sur le corps en **portrait** et en **paysage**, y compris mains et pieds près
   des bords du cadre ;
-- **rotation automatique désactivée**, puis appareil tourné d'un quart de tour. Attention à
-  l'oracle, il n'est pas « le squelette reste sur le corps » : dans cette configuration l'aperçu
-  lui-même montre la scène **couchée**, puisque `PreviewView` est aligné sur un affichage
-  verrouillé en portrait. L'analyse étant alignée sur le même affichage, ML Kit reçoit aussi une
-  personne couchée, et le modèle de pose attend un sujet debout. Le comportement attendu est donc
-  **« 0 point » et aucun squelette**. Ce qui serait un échec, c'est un squelette **décalé de 90°
-  par rapport au corps** : c'est ce que faisait la version d'avant le correctif ;
+- **rotation automatique désactivée**, puis appareil tourné d'un quart de tour. L'aperçu montre
+  alors la scène **couchée**, puisque `PreviewView` est aligné sur un affichage verrouillé en
+  portrait, et l'analyse reçoit exactement la même image. L'oracle est donc celui de partout
+  ailleurs : **le squelette reste posé sur le corps**, couché avec lui. Constaté sur l'appareil le
+  05/11/2026 — ML Kit détecte aussi une personne couchée. Ce qui serait un échec, c'est un
+  squelette **décalé de 90° par rapport au corps** : c'est ce que faisait la version d'avant le
+  correctif ;
 - bascule arrière ↔ frontale : miroir juste, et **aucune pose de l'ancien objectif** dessinée sur
   le nouveau ;
 - rotation après bascule, demi-tour paysage → paysage inversé compris ;
@@ -390,12 +390,21 @@ pourquoi le miroir n'existe qu'à l'affichage ; `SavedStateHandle` contre `remem
 
 ### Limites connues
 
-**1. Rotation automatique coupée et appareil tourné : la détection peut tomber.** On ne peut pas
-avoir les deux à la fois. L'image que voit ML Kit est soit alignée sur l'écran — projection juste,
-mais sujet couché, donc détection perdue — soit alignée sur la gravité — détection bonne, mais
-squelette décalé de 90°. Ce ticket garde l'alignement sur l'affichage : **c'est un échec sans
-donnée fausse**, « 0 point » et pas de squelette, là où un squelette décalé se présenterait comme
-une mesure. C'est la règle « échouer bruyamment ».
+**1. Rotation automatique coupée et appareil tourné : les coordonnées sont dans le repère de
+l'écran et non dans celui de la gravité.** L'image que voit ML Kit est alignée sur l'affichage,
+donc la projection est juste : vérifié sur le Honor 400, rotation automatique coupée et appareil
+tourné d'un quart de tour, la personne couchée est **détectée** et le squelette reste posé sur son
+corps.
+
+**L'hypothèse écrite ici avant ce test était fausse** : on attendait « 0 point » et aucun
+squelette, au motif que le modèle de pose veut un sujet debout. Il reconnaît aussi un sujet
+couché. C'est l'appareil qui a tranché, et c'est à ça que le test servait.
+
+Ce qui reste comme limite : dans cette configuration, les coordonnées de `PoseFrame` sont
+exprimées dans le repère de **l'écran** et pas dans celui de la **gravité**. Aucun effet sur un
+angle **entre deux segments**, qui ne dépend pas de la rotation du repère ; mais une règle qui
+mesurerait une inclinaison **par rapport à la verticale** — le dos penché — y lirait un angle
+faux.
 
 À noter pour qui rouvrira ce code : la javadoc de CameraX (`ImageAnalysis.setTargetRotation`)
 recommande un `OrientationEventListener` pour `ImageAnalysis`, précisément parce que l'orientation
@@ -403,10 +412,9 @@ d'affichage peut être verrouillée. On va donc sciemment contre ce conseil, et 
 `trackDisplayRotation` dit pourquoi : il faut le **même repère** que l'aperçu, sans quoi l'overlay
 est faux dans tous les cas, y compris les plus courants.
 
-**Ticket séparé à ouvrir** : garder l'analyse alignée sur la gravité et faire tourner la
-**projection** du delta affichage ↔ gravité. C'est la seule façon d'avoir la détection *et* la
-superposition dans cette configuration. Pas nécessaire tant que la rotation automatique est
-active.
+**Ticket ouvert** : [SCRUM-113](https://bodyvision.atlassian.net/browse/SCRUM-113) — analyse
+alignée sur la gravité, et projection qui compense le delta affichage ↔ gravité, pour avoir les
+deux repères justes à la fois. À traiter avant toute règle d'alerte fondée sur la verticale.
 
 **2. Pliables forcés en `TextureView` : l'aperçu peut rester figé sur une rotation.**
 `preview.targetRotation` n'est pas posé. Sans effet sur le chemin `SurfaceView`, celui du
