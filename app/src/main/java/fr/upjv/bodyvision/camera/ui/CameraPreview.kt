@@ -34,6 +34,10 @@ import fr.upjv.bodyvision.camera.data.FrameAnalysis
  * l'on sait qu'aucune image de la liaison précédente ne peut plus être livrée ; à qui ça sert et
  * pourquoi, c'est au `ViewModel` de le savoir — cette couche n'a pas à connaître la source de
  * poses.
+ *
+ * [onDisplayRotationChanged] est la discontinuité qui ne passe **pas** par là : un demi-tour ne
+ * change pas la configuration, donc cet effet n'est pas rejoué, alors que l'analyse se met bien à
+ * rendre des coordonnées tournées de 180°.
  */
 @Composable
 fun CameraPreview(
@@ -42,6 +46,7 @@ fun CameraPreview(
     onCameraUnavailable: () -> Unit,
     onCameraRecoveringChanged: (Boolean) -> Unit,
     onCameraUnbound: () -> Unit,
+    onDisplayRotationChanged: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -59,6 +64,9 @@ fun CameraPreview(
 
     AndroidView(factory = { previewView }, modifier = modifier)
 
+    // Les rappels ne sont pas des clés, pas plus que les trois autres : ils pointent tous vers le
+    // même `ViewModel`, et en faire des clés referait la liaison caméra à chaque recomposition si
+    // leur identité changeait.
     DisposableEffect(binder, lifecycleOwner, previewView, analysis, lens) {
         binder.bind(
             lifecycleOwner = lifecycleOwner,
@@ -71,6 +79,7 @@ fun CameraPreview(
             analysis = analysis,
             onUnavailable = onCameraUnavailable,
             onRecoveringChanged = onCameraRecoveringChanged,
+            onDisplayRotationChanged = onDisplayRotationChanged,
         )
         onDispose {
             binder.unbind()
