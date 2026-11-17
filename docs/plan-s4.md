@@ -830,6 +830,56 @@ adb exec-out run-as fr.upjv.bodyvision cat \
   écartées, les hors échantillon et la taille en octets ;
 - aucune image, aucune vidéo sur le disque : seulement des coordonnées.
 
+### Vérification sur appareil — séance du 17/11/2026
+
+Honor 400 (DNY-NX9), Android 16, appareil physique, binaire issu d'une porte complète verte
+(63 tests, 0 erreur lint, 0 violation ktlint). Cadrage trois-quarts à deux ou trois mètres. Neuf
+séries écrites, toutes conformes à `SeriesUpload`.
+
+| Geste | Résultat | Images écartées |
+|---|---|---|
+| 10 squats | 252 images, **9,99 par seconde**, 225 Ko, `t` de 0 à 25 122 | **0** |
+| Deux séries de suite | deux `batchId`, deux fichiers, le second repart à `t = 0` | 0 et 0 |
+| Quart de tour | terminée 41 ms après la liaison refaite, `capture` 480x640 seul | 0 |
+| **Demi-tour** | terminée 3 ms après la rotation, **aucune liaison refaite** | 16 |
+| Bascule de caméra | terminée 148 ms avant la liaison `BACK`, aucune image de l'arrière dedans | 0 |
+| 900 images | **900 exactement**, 89,913 s, **10,00 par seconde**, 793 Ko | **0** |
+| Bouton retour | fichier écrit, 61 images | 0 |
+
+**Zéro image écartée sur les six séries cadrées.** ML Kit rend ses 33 points dès qu'il détecte
+quelqu'un, jamais moins : le critère d'acceptation — moins de 1 %, soit au plus 3 sur 300 — n'a
+jamais été approché. Les 16 du demi-tour sont le temps passé hors cadre en attendant le
+déclenchement, et le compteur à l'écran affichait bien « 0 point » pendant ce temps.
+
+**L'échéance tient son débit.** 9,99 images par seconde sur 25 s avec une entrée à 23,5, puis
+**10,00 sur 90 s** avec la même entrée, écarts médians à 100 ms pile. La règle du seuil qu'elle
+remplace aurait donné ici 7,8 par seconde, et il aurait fallu 115 s pour remplir les 900 images que
+le contrat autorise — pour un `nominalFps` qui en annonce 10. C'est la mesure qui justifie le
+correctif.
+
+**Le demi-tour ne se vérifie pas à la main.** Un retournement lent passe par le portrait, le capteur
+enchaîne `90 → 0 → 270`, la configuration change et c'est le chemin 1 qui termine la série : bon
+résultat, mauvais chemin. Il a donc été forcé par `adb`, rotation automatique coupée et
+`user_rotation` de `3` à `1`, ce qui est exactement la transition qu'aucune nouvelle liaison
+n'accompagne. L'historique de rotation du système horodate la transition à 16:54:29.584, le `endedAt`
+de la série tombe à 16:54:29.587, et **aucune ligne `CameraSessionBinder` n'apparaît** : les chemins
+1 à 3 étaient hors jeu. La rotation automatique a été remise ensuite.
+
+Ce que l'appareil a démenti au passage : le demi-tour **portrait** n'existe pas sur ce modèle
+(`mAllowAllRotations=false`, le capteur n'atteint jamais `ROTATION_180`). Un KDoc l'affirmait, il est
+corrigé.
+
+**Poids réel** : 894 à 903 octets par image, donc 268 Ko pour 300 images — ce qui recoupe les
+0,26 Mo que le contrat annonce. L'estimation de 850 Ko pour 900 images était pessimiste : 793 Ko.
+
+**Un piège de méthode, pour qui refera ces mesures.** Le tampon de `logcat` fait 256 Ko par défaut,
+et le système émet deux lignes `RenderEngine` par image affichée : 13 194 lignes en deux minutes,
+qui chassent la ligne qu'on cherche. La première série a ainsi été perdue pour l'observation, pas
+pour l'application. Porter le tampon à 16 Mo (`adb logcat -G 16M`) avant la séance.
+
+Et `run-as` ne sert à rien pour lire ce dossier : `adb shell ls /sdcard/Android/data/<paquet>/files/`
+fonctionne directement, là où `run-as` se fait refuser l'accès au stockage externe.
+
 ### Ce que je t'explique à ce ticket
 
 Pourquoi une locale change le format d'un nombre et pourquoi c'est un piège du JSON ;
@@ -859,6 +909,14 @@ Le correctif est d'étendre `NonCancellable` **au joint aussi**, dans les deux c
 bloc démarre synchronement avant l'annulation, donc il la franchit. Ce qui reste : si le processus
 est tué dans l'intervalle, la série est perdue — mais ce n'est plus le cas courant, c'est une mort
 de processus.
+
+**Éprouvé par l'inverse sur le Honor 400, le 17/11/2026**, parce qu'un comportement correct ne
+prouve pas qu'une barrière sert à quelque chose. `NonCancellable` remis autour de la seule écriture,
+installé, puis cinq secondes d'enregistrement suivies du bouton retour : **aucun fichier** — neuf
+avant, neuf après — et **aucune ligne de journal**. Le fichier restauré par `git checkout --`,
+réinstallé, même geste : un dixième fichier et sa ligne, 68 images gardées, 0 écartée. La perte
+était donc systématique, et le raisonnement sur le looper est confirmé par l'appareil et non
+seulement par la lecture.
 
 Leçon à garder : `NonCancellable` protège ce qu'il **entoure**, pas ce qui suit, et une coroutine
 lancée sur une portée qu'on est en train de détruire n'a qu'un seul tour de looper d'avance.
@@ -890,6 +948,31 @@ est « ce champ est la résolution d'analyse », alors il faut y écrire 640x480
 contrat de quoi dire par quoi les coordonnées sont normalisées — sinon le serveur dénormalisera de
 travers une série sur deux. Le code n'est pas changé en attendant : la valeur actuelle est la seule
 des deux qui soit exploitable.
+
+**5. `endedAt` est calculé, pas observé, et il arrive en retard.** Il vaut `startedAt` plus le `t` de
+la dernière image gardée, donc il mélange **deux horloges**. Les `t` dérivent des horodatages
+**capteur**, pris au début de l'exposition. `startedAt` est l'horloge **murale**, lue au moment où la
+première pose gardée est acceptée par l'accumulateur — donc après l'exposition, la lecture du
+capteur, la livraison de l'image, l'inférence ML Kit, l'émission dans le flux et le réveil du
+collecteur. Tout ce retard se reporte sur `endedAt`.
+
+Conséquence : la **durée** `endedAt − startedAt` est exacte, ses deux bornes dérivant des mêmes
+horodatages capteur. C'est le **placement absolu** du couple qui est décalé tardivement.
+
+La preuve dure, et c'est la seule : dans la série de la bascule de caméra, la ligne de journal qui
+annonce le fichier **écrit** est datée de **46 ms avant** le `endedAt` contenu dans ce même fichier.
+Les deux horodatages viennent de la même horloge murale, et un fichier ne peut pas être écrit avant
+la fin de la série qu'il décrit.
+
+**Ce qui reste ouvert, et il faut le dire ainsi** : l'amplitude n'est pas expliquée. L'écart entre
+`endedAt` et l'événement qui a terminé la série valait +3 ms au demi-tour, +12 ms au quart de tour et
++194 ms à la bascule de caméra. Un modèle à latence unique ne les réconcilie pas — l'écart devrait
+valoir « latence de la première image moins l'âge de la dernière », et l'âge d'une image gardée est
+plafonné par la période d'échantillonnage, ce qui rend +3 et +194 incompatibles entre eux. Le signe
+est donc certain, l'ordre de grandeur est de quelques dizaines à quelques centaines de
+millisecondes, et la cause exacte de la dispersion n'est pas établie. À rouvrir si le Cloud se met à
+corréler des séries entre elles à mieux qu'une demi-seconde ; sans effet sur l'analyse d'une série,
+qui ne dépend que des `t`.
 
 ### Hors périmètre, assumé
 

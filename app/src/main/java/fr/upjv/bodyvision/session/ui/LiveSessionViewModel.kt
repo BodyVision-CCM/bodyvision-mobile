@@ -348,6 +348,14 @@ class LiveSessionViewModel(
      * et un enregistrement démarré dans les dizaines de millisecondes qui suivent un demi-tour en
      * est un. Sa première image gardée serait alors celle d'**avant** la rotation — celle qui fixe
      * `startedAt` et le repère de toute la série.
+     *
+     * **Vérifié sur le Honor 400 le 17/11/2026**, et ce chemin ne se vérifie pas autrement qu'en
+     * forçant la rotation : un retournement à la main passe presque toujours par le portrait, ce qui
+     * change la configuration et fait terminer la série par [onCameraUnbound] — le bon résultat, mais
+     * par le chemin 1. En forçant `user_rotation` de `3` à `1` pendant un enregistrement, la série
+     * s'est terminée 3 ms après la rotation, son fichier a été écrit, et **aucune ligne de liaison
+     * caméra n'a été émise** : les trois autres chemins étaient donc hors jeu. Détail dans
+     * `docs/plan-s4.md`.
      */
     fun onDisplayRotationChanged() {
         poseSource.discardPendingFrames()
