@@ -34,6 +34,17 @@
     <string name="action_use_front_camera_description">Basculer vers la caméra frontale</string>
     <string name="action_use_back_camera_description">Basculer vers la caméra arrière</string>
 
+    <!-- Enregistrement d'une série (SCRUM-37). Le libellé nomme l'action, pas l'état : un bouton
+         promet ce qu'il va faire. La description reprend l'action entière, parce qu'un lecteur
+         d'écran annonce le bouton hors de son contexte visuel. -->
+    <string name="action_start_recording">Démarrer</string>
+    <string name="action_stop_recording">Arrêter</string>
+    <string name="action_start_recording_description">Démarrer l’enregistrement de la série</string>
+    <string name="action_stop_recording_description">Arrêter l’enregistrement de la série</string>
+    <!-- Indicateur affiché pendant toute la durée de l'enregistrement. Le point fait partie du
+         texte et non d'un décor : un lecteur d'écran n'annoncerait pas une pastille dessinée. -->
+    <string name="recording_indicator">● Enregistrement</string>
+
     <string name="action_retry">Réessayer</string>
     <string name="action_open_settings">Ouvrir les réglages</string>
 </resources>

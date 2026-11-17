@@ -53,6 +53,9 @@ import fr.upjv.bodyvision.camera.data.CameraLens
 import fr.upjv.bodyvision.camera.data.availableCameraLenses
 import fr.upjv.bodyvision.camera.ui.CameraPreview
 import fr.upjv.bodyvision.pose.ui.SkeletonOverlay
+import fr.upjv.bodyvision.telemetry.data.TELEMETRY_DIRECTORY_NAME
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val PANE_PADDING = 24.dp
 private val PANE_SPACING = 16.dp
@@ -65,6 +68,13 @@ private val BANNER_TEXT_PADDING_HORIZONTAL = 16.dp
 private val COUNTERS_MARGIN = 16.dp
 private val COUNTERS_TEXT_PADDING_HORIZONTAL = 12.dp
 private val COUNTERS_TEXT_PADDING_VERTICAL = 6.dp
+
+/**
+ * De quoi poser le bouton d'enregistrement **au-dessus** de la ligne du bas, où les compteurs
+ * tiennent la gauche et la bascule d'objectif la droite. Centré à la même hauteur, il les
+ * recouvrirait sur un écran étroit : les trois réunis dépassent la largeur d'un portrait.
+ */
+private val RECORD_BUTTON_BOTTOM_CLEARANCE = 64.dp
 
 /** Assez opaque pour que le texte reste lisible sur une image de caméra claire. */
 private const val BANNER_OPACITY = 0.9f
@@ -124,6 +134,15 @@ fun LiveSessionScreen(viewModel: LiveSessionViewModel = viewModel()) {
         }
     }
 
+    // Le dossier où les séries sont écrites. Lu ici parce que `getExternalFilesDir` exige un
+    // `Context`, que le `ViewModel` n'a pas et ne doit pas avoir — même motif que les objectifs
+    // ci-dessus. Sur `Dispatchers.IO` : cet appel crée le dossier s'il manque, donc il touche le
+    // disque, et le thread principal n'a pas à l'attendre.
+    LaunchedEffect(Unit) {
+        val directory = withContext(Dispatchers.IO) { context.getExternalFilesDir(TELEMETRY_DIRECTORY_NAME) }
+        viewModel.onTelemetryDirectoryObserved(directory)
+    }
+
     // L'arrêt ne défait pas la liaison — `CameraPreview` reste dans la composition — donc rien
     // d'autre ne viendrait oublier la dernière pose, et elle serait redessinée au retour avant la
     // première image de la caméra.
@@ -161,6 +180,7 @@ fun LiveSessionScreen(viewModel: LiveSessionViewModel = viewModel()) {
                             onCameraUnavailable = viewModel::onCameraUnavailable,
                             onCameraRecoveringChanged = viewModel::onCameraRecoveringChanged,
                             onCameraUnbound = viewModel::onCameraUnbound,
+                            onDisplayRotationChanged = viewModel::onDisplayRotationChanged,
                             modifier = Modifier.fillMaxSize(),
                         )
                         // Retiré de la composition pendant une reprise : l'aperçu est figé, et un
@@ -188,6 +208,26 @@ fun LiveSessionScreen(viewModel: LiveSessionViewModel = viewModel()) {
                                 onClick = viewModel::onLensToggled,
                                 modifier = Modifier.align(Alignment.BottomEnd),
                             )
+                        }
+                        // Au-dessus de la ligne du bas, et centré : c'est l'action principale de
+                        // l'écran, et elle doit être atteignable au pouce dans les deux
+                        // orientations.
+                        //
+                        // Retiré pendant une reprise, comme l'overlay et pour la même raison : la
+                        // caméra ne livre plus d'image, donc un enregistrement démarré là
+                        // n'enregistrerait rien. C'est aussi ce qui garantit que l'indicateur et le
+                        // bandeau de reprise ne se montrent jamais ensemble.
+                        if (!uiState.isCameraRecovering) {
+                            RecordButton(
+                                isRecording = uiState.isRecording,
+                                isEnabled = uiState.isRecordingAvailable,
+                                onClick = viewModel::onRecordingToggled,
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                            )
+                        }
+                        // En haut à gauche : le bandeau de reprise tient le haut au centre.
+                        if (uiState.isRecording) {
+                            RecordingIndicator(modifier = Modifier.align(Alignment.TopStart))
                         }
                         // Un bandeau et non un panneau : CameraPreview reste dans la composition,
                         // donc aucun unbind() ne vient interrompre la reprise que CameraX est en
@@ -302,6 +342,86 @@ private fun LensSwitchButton(
                 .semantics { contentDescription = description },
     ) {
         Text(text = label)
+    }
+}
+
+/**
+ * Le bouton qui démarre et termine l'enregistrement d'une série.
+ *
+ * Un seul bouton pour les deux actions, parce qu'il n'y a qu'un état à la fois, et son libellé dit
+ * ce qu'il va faire — pas ce qui se passe. Ce qui se passe, c'est l'indicateur qui le dit.
+ *
+ * [isRecording] peut retomber **sans qu'on ait touché ce bouton** : une rotation, un demi-tour, une
+ * bascule d'objectif ou la 900e image terminent la série. C'est voulu, et c'est pour ça que le
+ * libellé est dérivé de l'état et non d'un drapeau local au bouton.
+ *
+ * [isEnabled] est faux tant que le dossier d'écriture n'est pas connu. Un bouton **inactif** et non
+ * un bouton sans effet : une action refusée doit se voir, et une ligne de journal ne se voit pas.
+ */
+@Composable
+private fun RecordButton(
+    isRecording: Boolean,
+    isEnabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label =
+        if (isRecording) {
+            stringResource(R.string.action_stop_recording)
+        } else {
+            stringResource(R.string.action_start_recording)
+        }
+    val description =
+        if (isRecording) {
+            stringResource(R.string.action_stop_recording_description)
+        } else {
+            stringResource(R.string.action_start_recording_description)
+        }
+
+    Button(
+        onClick = onClick,
+        enabled = isEnabled,
+        // Bas et côtés comme les compteurs, plus de quoi passer au-dessus d'eux.
+        modifier =
+            modifier
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+                ).padding(COUNTERS_MARGIN)
+                .padding(bottom = RECORD_BUTTON_BOTTOM_CLEARANCE)
+                .semantics { contentDescription = description },
+    ) {
+        Text(text = label)
+    }
+}
+
+/**
+ * La pastille « enregistrement en cours », visible pendant toute la durée de la série.
+ *
+ * En couleur d'erreur du thème, qui est le rouge du jeu sombre : c'est la convention d'un
+ * enregistrement, et ça évite d'inventer une couleur hors du thème. Le point est dans le texte et
+ * non dessiné, pour qu'un lecteur d'écran l'annonce avec le reste.
+ */
+@Composable
+private fun RecordingIndicator(modifier: Modifier = Modifier) {
+    Surface(
+        modifier =
+            modifier
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+                ).padding(BANNER_MARGIN),
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = BANNER_OPACITY),
+        contentColor = MaterialTheme.colorScheme.error,
+    ) {
+        Text(
+            text = stringResource(R.string.recording_indicator),
+            style = MaterialTheme.typography.labelLarge,
+            modifier =
+                Modifier.padding(
+                    horizontal = COUNTERS_TEXT_PADDING_HORIZONTAL,
+                    vertical = COUNTERS_TEXT_PADDING_VERTICAL,
+                ),
+        )
     }
 }
 

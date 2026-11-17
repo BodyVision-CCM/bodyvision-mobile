@@ -460,3 +460,523 @@ Gardés ici pour qu'ils ne se reperdent pas, aucun n'étant du périmètre de ce
 Export JSON et télémétrie (SCRUM-37), réseau (S6), seuil de `visibility` et filtrage des points
 peu fiables (S5), optimisation du FPS (SCRUM-41), affichage d'angles ou d'alertes (SCRUM-64),
 base locale, injection de dépendances.
+
+---
+
+## SCRUM-37 — Extraire les landmarks et générer le JSON de télémétrie
+
+Branche `feat/scrum-37-json-telemetrie`, depuis `main` à `c564a68`.
+
+### Contexte
+
+SCRUM-36 a rendu les poses visibles, pas conservables : elles sont dessinées puis jetées. Le jalon 1
+demande la preuve que l'appareil produit de la télémétrie **conforme au contrat**. Ce ticket
+enregistre une série à la demande, la sous-échantillonne à 10 FPS, l'encode en JSON conforme au
+schéma `SeriesUpload` du contrat 0.4.1, et l'écrit dans un fichier du stockage propre à
+l'application. Le fichier est validé contre le contrat **hors de ce dépôt**.
+
+Aucun code réseau, aucune base locale, aucune dépendance nouvelle. La ligne « Format de télémétrie
+— à implémenter en S6 » de `CLAUDE.md` est corrigée par ce ticket : la décision figée était « pas de
+réseau avant S6 », pas « pas de JSON avant S6 ».
+
+### Le contrat, et ce qu'il dit exactement
+
+`BodyVision-CCM/bodyvision-contracts@main`, `openapi.yaml` **0.4.1**, schémas `SeriesUpload` et
+`Frame`. Non recopié ici — une copie locale périme en silence. Ce qui a été lu et respecté :
+
+- `SeriesUpload.required` : `batchId`, `index`, `exerciseCode`, `startedAt`, `endedAt`,
+  `contractVersion`, `capture`, `frames` ;
+- `capture.required` : `landmarkSet`, `model`, `analysisWidth`, `analysisHeight`, `nominalFps` ;
+- `frames.maxItems: 900` ; `Frame.required` : `t`, `lm` ; `lm` : exactement 33 éléments de
+  4 nombres, « dans l'ordre des indices `PoseLandmark` de ML Kit (0 à 32), l'ordre du tableau
+  faisant foi », « trois décimales » ;
+- `Frame.t` : « décalage en ms depuis `startedAt`. Strictement croissant. » ;
+- `ExerciseCode` : motif `^[A-Z0-9_]+$`.
+
+Le format du spike (`JsonFrameExporter` de SCRUM-23, objets nommés `{"type":…,"x":…}`) a servi à
+**dimensionner** ce contrat et n'est pas ce contrat : il n'est pas repris.
+
+### Ce que la relecture a changé
+
+Le sous-agent `revue-bodyvision` a rendu la première version **non fusionnable**, et il avait
+raison sur les deux points qui comptent. Les six correctifs, dans l'ordre de ce qu'ils coûtaient :
+
+1. **Le demi-tour mettait deux repères dans un même fichier** (bloquant). `onDisplayChanged` était
+   un quatrième chemin de discontinuité que personne n'avait vu, et la taille redressée ne change
+   pas sur un demi-tour : rien ne pouvait le détecter, ni dans l'application ni en aval. Corrigé par
+   un rappel depuis `trackDisplayRotation`, là où les trois autres discontinuités sont déjà
+   traitées — et non en faisant descendre `rotationDegrees` jusqu'à l'accumulateur de télémétrie,
+   qui est une information de caméra et n'a rien à faire dans le domaine de l'envoi.
+2. **Le bouton retour perdait la série à chaque fois**, et la limite connue affirmait le contraire.
+   Voir la limite n° 1, réécrite : l'hypothèse démentie y reste.
+3. **Le sous-échantillonnage était un seuil et non une cadence.** Non signalé par la relecture, mais
+   trouvé en écrivant les tests, et corrigé dans le même passage : voir « une échéance, pas un
+   seuil ».
+4. **Une levée dans la collecte laissait l'écran bloqué sur « Arrêter »** pour toujours, et la garde
+   de `start()` refusait alors tout nouvel enregistrement. L'erreur est maintenant rattrapée,
+   journalisée, et l'état remis à zéro.
+5. **Le bouton ne faisait rien, sans le dire**, tant que le dossier d'écriture n'était pas connu. Il
+   est désormais **inactif** : une action refusée doit se voir, et une ligne de journal ne se voit
+   pas.
+6. **Deux tests ne pouvaient pas échouer.** Le test de locale des horodatages passait sans
+   `Locale.ROOT`, parce que le français est grégorien : il force maintenant une locale thaïe, qui
+   écrit 2544 au lieu de 2001. Et le test « aucun caractère à échapper » laissait passer un
+   guillemet au milieu d'une valeur, c'est-à-dire le seul cas qui compte : il compte maintenant les
+   guillemets non échappés. Un test qui promet un filet et n'en tend pas est pire que pas de test.
+
+Un constat a été **écrit plutôt que corrigé** : l'ambiguïté de `capture.analysisWidth`, qui est une
+question pour le propriétaire du contrat et pas un défaut du code (limite n° 4).
+
+### Décisions qui viennent de toi
+
+- **Toute discontinuité du flux termine la série**, et pas seulement les deux cas du ticket
+  (changement de taille d'image, bascule de caméra). Une série est une **fenêtre continue d'un seul
+  repère d'image** ; un fichier qui porterait un trou de dix minutes dans ses `t`, ou deux repères
+  à la suite, ne décrirait aucun mouvement réel. **Quatre chemins**, dont trois existaient depuis
+  SCRUM-36 :
+  1. `onCameraUnbound()` — liaison défaite : bascule d'objectif, quart de tour, sortie d'écran ;
+  2. `onScreenStopped()` — passage en arrière-plan ;
+  3. l'entrée en reprise caméra — plus aucune image livrée ;
+  4. `onDisplayRotationChanged()` — **le demi-tour**, trouvé par la relecture. Paysage vers paysage
+     inversé ne change pas la configuration, donc aucun des trois premiers chemins ne se déclenche,
+     et la taille redressée est identique : la règle de taille ne peut pas le voir. L'analyse, elle,
+     se met bien à rendre des coordonnées tournées de 180°. Le signal vient du
+     `DisplayManager.DisplayListener` que SCRUM-36 avait déjà posé dans `trackDisplayRotation`, et
+     qui ne rapportait rien à personne.
+
+Les quatre chemins appellent **aussi** `discardPendingFrames()`, et le quatrième pour une raison qui
+lui est propre : le `replay = 1` du flux sert la dernière pose à tout **nouveau collecteur**, et un
+enregistrement démarré juste après un demi-tour en est un. Sans l'oubli, sa première image gardée
+serait celle d'avant la rotation — celle qui fixe `startedAt` et le repère de toute la série. Le
+raisonnement « l'overlay reste abonné, donc le cache n'est pas resservi » ne valait que pour
+l'overlay.
+- **`startedAt` est l'horloge murale lue à la première image *gardée***, et non au toucher du
+  bouton. C'est ce qui fait coïncider `t = 0` avec `startedAt`, comme le contrat l'exige. Lue au
+  toucher, elle serait antérieure de l'écart — une image si quelqu'un est déjà dans le cadre,
+  beaucoup plus sinon — et la durée `endedAt − startedAt` annoncerait une série plus longue qu'elle
+  n'est.
+- **L'orchestration de l'enregistrement vit dans `telemetry/data/TelemetryRecording`**, possédée par
+  le `ViewModel`, plutôt que dans le `ViewModel` lui-même : la logique d'enregistrement reste dans
+  sa fonctionnalité, et `LiveSessionViewModel` garde trois rôles au lieu de quatre.
+- **`isRecording` repasse à `false` dès que la série est close**, quoi que l'ait closée — bouton,
+  discontinuité, taille d'image ou 900e image. L'écriture du fichier est la queue de l'opération,
+  pas sa fin : la montrer comme un enregistrement en cours laisserait croire qu'on capte encore.
+- **`contractVersion` vaut `1.0`**, tranché par le propriétaire du contrat : le champ porte la
+  version du **format de télémétrie** — la structure de `SeriesUpload` et de `Frame` — et non
+  `info.version` du document OpenAPI. Les deux numéros vivent dans le même fichier de contrat et ne
+  bougent pas ensemble : le format en est à sa première version, le document est en `0.4.1` et
+  continuera d'avancer sans que la constante change. Elle ne s'incrémentera que si la structure de
+  `SeriesUpload` ou de `Frame` change. Constante unique, et aucun littéral de cette valeur ailleurs,
+  pas même dans les tests.
+
+### Décisions qui viennent de moi
+
+- **Une fonctionnalité `telemetry/`**, avec `domain/` pur et `data/` pour Android, ML Kit, les
+  coroutines et le disque — le même découpage que `pose/` et `camera/`. Tout ce qui décide est dans
+  `domain/`, donc testable sur la JVM ; `data/` ne fait que brancher.
+- **L'ordre des 33 points est *dérivé* de la table du mappeur**, jamais réécrit :
+  `landmarkTypesByMlKitType.toSortedMap().values.toList()`. Une seconde liste écrite à la main
+  serait une seconde source de vérité, et son erreur serait invisible dans un fichier de 280 Ko.
+  Jamais `ordinal` : le domaine dit que l'ordre de déclaration de son enum n'a aucune signification.
+- **L'accumulateur reçoit son horloge** (`() -> Long`) au lieu d'appeler
+  `System.currentTimeMillis()`. Sans ça, le test « cette petite série redonne exactement cette
+  chaîne » ne pourrait pas exister. Mocker l'horloge, c'est mocker une frontière, pas la logique.
+- **`SeriesRecorder` est à usage unique** : une fois clos, `accept` rend `CLOSED` et n'ajoute plus
+  rien. Un accumulateur recyclé par erreur ne produirait pas une série mélangée, il ne produirait
+  rien — un défaut bruyant plutôt qu'un fichier faux.
+- **`SimpleDateFormat` et non `java.time`** : `minSdk 24`, et aucun desugaring de la bibliothèque
+  standard n'est déclaré. `Instant`/`DateTimeFormatter` donneraient une **erreur** lint `NewApi`, et
+  l'activer demanderait la dépendance `desugar_jdk_libs`, interdite ici.
+- **Aucune image gardée ⇒ aucun fichier.** Sans image gardée il n'y a ni taille d'image pour
+  `capture`, ni `startedAt` — tous deux requis. Le journal le dit, avec le compte d'images écartées.
+- **Le dossier d'écriture vient de l'écran**, pas d'un `Context` dans le `ViewModel` : le même motif
+  que `onAvailableLensesObserved` de SCRUM-36. Le `ViewModel` ne garde qu'un `File`.
+
+### Les quatre règles de sélection, dans l'ordre où elles s'appliquent
+
+L'ordre décide de ce qui est compté, donc il est écrit :
+
+1. **taille redressée différente de celle de la série** → la série se termine **sur l'image
+   précédente**, celle-ci n'est pas examinée. La taille est figée par la première image *vue*, pas
+   par la première gardée : elle vient de la caméra et ne dépend pas de la présence de quelqu'un
+   dans le cadre. Tout le fichier a donc la taille annoncée dans `capture` ;
+2. **pas due** — l'horodatage n'a pas atteint l'échéance d'échantillonnage → hors échantillon ;
+3. **les 33 points ne sont pas tous là, ou une valeur n'est pas finie** → écartée et **comptée**.
+   Rien n'est inventé : pas de zéro, pas de répétition du point précédent ;
+4. **gardée.** À la première : `startedAt = horloge()` et `t = 0`. Ensuite `t` = écart en
+   millisecondes avec l'horodatage de la première gardée. À 900 images, la série se termine.
+
+**Le sous-échantillonnage : une échéance, pas un seuil.** C'est la distinction qui décide du débit,
+et elle n'est pas intuitive — la première version de ce ticket s'y est trompée.
+
+Sous-échantillonner **par le temps** et non « une image sur trois » va de soi : le débit réel varie
+de 15 à 30 par seconde selon la lumière et la chauffe, donc un pas fixe donnerait tantôt 5, tantôt
+10 images par seconde. Mais « au moins 100 ms depuis la dernière gardée » est un **seuil**, et un
+seuil dérive : sur une grille de 33 ms, trois images ne font que 99 ms, il en faut donc quatre, et
+le débit tombe à **7,6 par seconde** pour un `nominalFps` qui annonce 10 — 24 % d'écart, dont le
+serveur tirerait des vitesses fausses. À 34 ms, la cadence mesurée de l'appareil, le même seuil
+donne 9,8. Un millième de seconde d'écart à l'entrée, un quart du débit à la sortie : ce n'est pas
+une règle, c'est un hasard.
+
+La règle retenue est donc une **échéance** : `nextSample` est posée à la première image gardée, puis
+avance de **100 ms exactement** à chaque image gardée — jamais de « maintenant + 100 ms ». Une image
+est gardée si son horodatage a atteint l'échéance. On garde donc la première image passé chaque
+multiple de 100 ms, le débit vaut 10 par seconde à une image près quelle que soit la période
+d'entrée, et deux tests l'épinglent à 33 et à 34 ms.
+
+L'échéance se **recale** dans un seul cas, et il en faut deux pour la justifier :
+- après un trou du flux — personne dans le cadre pendant cinq secondes, donc aucune image gardée
+  pendant que le temps avançait. Sans recalage, l'échéance resterait en retard et garderait *toutes*
+  les images au retour de la personne, le temps de rattraper : une rafale à 30 par seconde au milieu
+  du fichier ;
+- quand l'échéance tombe **exactement** sur l'horodatage gardé. Le recalage garantit alors que
+  l'échéance rendue est toujours strictement supérieure à l'horodatage gardé, donc qu'une seconde
+  image au même horodatage n'est jamais due. C'est ce qui rend `t` **strictement croissant** sans
+  second test — y compris pour un horodatage qui recule.
+
+Ce que l'échéance **garantit**, et qui est plus fort qu'une moyenne : elle n'avance que de 100 ms
+par image gardée et ne recule jamais, donc le nombre d'images gardées sur une durée *D* est majoré
+par `D / 100 + 1`. Le débit ne peut donc **jamais** dépasser 10 par seconde sur la durée d'une
+série, et 900 images couvrent 89,9 s sur une grille de 33 ms. `nominalFps: 10` passe ainsi d'une
+approximation à une borne honorée.
+
+Contrepartie assumée : quand une image arrive **en retard** sur sa tranche, la suivante revient sur
+l'horaire plutôt que de décaler tout le reste, donc l'écart entre deux images gardées peut descendre
+jusqu'à **une période de livraison d'entrée**, soit ≈33 ms sur l'appareil cible. La règle est
+mécanique : une image gardée qui dépasse son échéance de *d* millisecondes, avec *d* < 100 donc sans
+recalage, laisse `100 − d` jusqu'à la suivante — un hoquet d'inférence sous charge thermique qui
+retarde une livraison de 67 ms suffit. Le vecteur de test, lui, descend à 60 et 70 ms : ce sont ses
+nombres, pas la borne. Les `t` restent justes et strictement croissants — chaque image porte le
+sien — et le débit global reste plafonné : seule la régularité de l'échantillonnage est perdue. La
+règle du seuil garantissait l'inverse : des écarts réguliers, et un débit faux.
+
+**Deux compteurs, pas un.** À 30 FPS, deux images sur trois sont normalement hors échantillon : les
+compter comme « écartées » noierait le seul chiffre qui signale une anomalie. Le journal donne les
+trois nombres séparément.
+
+**900 images = 90 secondes** à 10 FPS nominal, un peu plus si des images sont écartées.
+
+### L'encodeur, écrit à la main
+
+`org.json` est vide dans les tests JVM — c'est un stub dans `android.jar` — et
+kotlinx.serialization ajouterait un plugin à une chaîne d'outils figée. L'encodeur est donc du
+Kotlin pur sur un `StringBuilder`, et il se défend ici parce que le schéma est **petit, plat et
+figé** : huit champs, un objet `capture`, un tableau de nombres. Pour un schéma qui changerait
+souvent, ce choix serait mauvais — chaque champ ajouté se paierait en code d'encodage et en test.
+
+Deux pièges, et comment ils sont fermés :
+
+- **La locale.** `String.format("%.3f", 0.5f)` rend `0,500` sur un téléphone en français, et une
+  virgule décimale n'est pas du JSON : le fichier serait rejeté par le serveur sans que rien ne
+  l'ait signalé sur l'appareil. Tous les nombres passent donc par
+  `String.format(Locale.ROOT, "%.3f", …)`, et un test force `Locale.FRANCE` avant d'encoder pour le
+  prouver.
+- **`NaN` et infini** n'existent pas en JSON. Ils sont écartés à la règle 3, avant l'encodeur :
+  `NormalizedLandmark` documente « fini » comme un invariant attendu, et ceci en est le dernier
+  garde-fou, pas le premier.
+
+**Aucune chaîne n'a besoin d'être échappée, et c'est structurel.** Les seules chaînes écrites sont
+(a) des littéraux du code source — noms de clés, `SQUAT`, `1.0`, `MLKIT_POSE_33`, `BASE` — et
+(b) deux valeurs que l'encodeur **fabrique lui-même** : l'UUID (`[0-9a-f-]`) et les deux
+horodatages, produits par un motif de date fixe (`[0-9T:.Z-]`). Aucun texte venu de quelqu'un, d'un
+fichier ou du réseau n'entre dans le JSON, et `exerciseCode` est une constante du code et non un
+paramètre d'écran. Un test le vérifie par une expression régulière sur la sortie entière.
+
+### Les fils d'exécution
+
+- La **collecte** tourne dans `scope.launch` + `withContext(Dispatchers.Default)` :
+  `viewModelScope` est sur `Dispatchers.Main.immediate`, donc sans ce dispatcher explicite la
+  conversion des 33 points tomberait dix fois par seconde sur le thread d'interface.
+- L'**écriture** est sur `Dispatchers.IO` : un thread qui attend le disque ne doit pas occuper un
+  des rares threads de calcul.
+- L'**arrêt venu de l'extérieur** fait `job.cancelAndJoin()` **avant** de lire l'accumulateur :
+  c'est ce qui garantit que plus personne ne le touche pendant l'encodage, sans un seul verrou.
+- **Sortir d'une collecte sans exception de contrôle** : `takeWhile { recorder.accept(it) == OPEN }`
+  suivi de `collect()`. Quand la série se ferme d'elle-même, la collecte s'arrête et la ligne
+  suivante écrit le fichier.
+- L'écriture est enveloppée dans `NonCancellable` : la série est close et son fichier est la seule
+  trace qui en reste.
+
+### Ce qui est écrit
+
+```
+telemetry/domain/TelemetryContract.kt    les valeurs du contrat, en constantes commentées
+telemetry/domain/TelemetryFrame.kt       t + 33 points ordonnés
+telemetry/domain/TelemetrySeries.kt      la série terminée, immuable
+telemetry/domain/OrderedLandmarks.kt     la map vers les 33 points, ou null si incomplète
+telemetry/domain/SeriesRecorder.kt       l'accumulateur : garde, écarte, termine
+telemetry/domain/IsoUtcTimestamp.kt      millisecondes epoch → ISO 8601 UTC, Locale.ROOT
+telemetry/domain/SeriesUploadJson.kt     l'encodeur, à la main
+telemetry/data/MlKitLandmarkOrder.kt     l'ordre des indices ML Kit, dérivé du mappeur
+telemetry/data/TelemetryFileWriter.kt    écriture dans getExternalFilesDir("telemetry")
+telemetry/data/TelemetryRecording.kt     l'enregistrement : batchId, collecte, écriture, journal
+camera/data/CameraSessionBinder.kt       + onDisplayRotationChanged, et seulement sur un vrai
+                                           changement de rotation
+camera/ui/CameraPreview.kt               + le rappel de rotation d'affichage, passé à la liaison
+session/ui/LiveSessionUiState.kt         + isRecording et isRecordingAvailable, deux scalaires
+session/ui/LiveSessionViewModel.kt       possède l'enregistrement, le dossier, les quatre
+                                           discontinuités
+session/ui/LiveSessionScreen.kt          bouton, indicateur, et le dossier donné au ViewModel
+res/values/strings.xml                   libellés, descriptions d'accessibilité, en français
+CLAUDE.md                                la ligne « Format de télémétrie » corrigée
+```
+
+### Tests JVM
+
+JUnit 4 seul, et tout ce qui est testé est synchrone et pur.
+
+`SeriesRecorderTest` : une entrée régulière à **34 ms** garde 10 images par seconde ; une entrée à
+**33 ms** aussi — les deux côtés du seuil qui faisait tomber l'ancienne règle à 7,6 ; un flux
+irrégulier ne garde qu'une image par échéance ; la première image est toujours gardée ;
+`t` part de 0 et croît strictement ; un horodatage en double n'est pas gardé ; une image sans
+personne est écartée et comptée ; une image à 32 points est écartée et comptée ; une coordonnée
+`NaN` est écartée ; un `visibility` infini est écarté ; changement de taille → la série se termine
+sur l'image précédente ; 900 images → la série se termine et la 901e n'est pas ajoutée ; aucune
+image gardée → pas de série ; `startedAt` est l'horloge de la première image **gardée** ; un
+accumulateur clos reste clos.
+
+`MlKitLandmarkOrderTest` : 33 éléments sans doublon ; l'ordre est celui des indices ML Kit, vérifié
+aux indices 0, 11, 12, 23, 24 et 32 **contre la table du mappeur** et non contre une liste réécrite.
+
+`SeriesUploadJsonTest` : locale `FRANCE` forcée → des points décimaux et aucune virgule dans un
+nombre ; trois décimales, règle d'arrondi épinglée ; une valeur hors cadre (1,25 et −0,1) gardée
+telle quelle ; une petite série connue redonne **exactement** la chaîne attendue ; la sortie ne
+contient que les caractères attendus **et** exactement 44 guillemets, tous de structure, aucune
+barre oblique inverse — un guillemet entré dans une valeur en ferait 45.
+
+`IsoUtcTimestampTest` : un instant connu donne la chaîne attendue ; locale **thaïe** (calendrier
+bouddhiste, qui écrit 2544 au lieu de 2001) et fuseau non UTC forcés → la même chaîne. Pas
+`Locale.FRANCE` : le français est grégorien et en chiffres arabes, donc le test passait même sans
+`Locale.ROOT`.
+
+**Pas de test sur `TelemetryRecording`, et c'est un choix assumé.** « Deux enregistrements
+consécutifs donnent deux `batchId` et deux fichiers » est son comportement, mais l'éprouver
+demanderait d'émettre dans un vrai `SharedFlow` vers un collecteur sur `Dispatchers.Default` et
+d'espérer qu'il soit prêt : le test échouerait parfois pour une raison de synchronisation, pas pour
+la raison qu'il annonce. Sans `kotlinx-coroutines-test` — dépendance nouvelle, donc interdite — il
+n'y a pas de version honnête de ce test. Et sa version « domaine » (deux accumulateurs construits
+avec deux `batchId` portent deux `batchId`) serait vraie par construction, exactement le test que la
+relecture de SCRUM-36 a fait supprimer. À la place : le `batchId` et l'accumulateur sont des
+**variables locales de `start()`**, donc il n'y a rien à réutiliser ; l'accumulateur clos refuse les
+images suivantes, et ça se teste ; et deux enregistrements de suite sont vérifiés **sur l'appareil**.
+
+Pas de test sur `TelemetryFileWriter` : il n'a de comportement qu'avec un disque Android, et le
+simuler ne testerait que la simulation. Pas de test sur le `ViewModel` : `MlKitPoseSource` le rend
+non constructible sur la JVM — limite connue de SCRUM-36, et c'est pourquoi toute la logique à
+risque est dans `telemetry/domain`.
+
+### Vérification
+
+```powershell
+.\gradlew.bat clean build test lint --rerun-tasks
+.\gradlew.bat ktlintCheck --rerun-tasks
+```
+
+Attendu : `BUILD SUCCESSFUL`, **0 erreur** lint, **0 violation** ktlint. Les avertissements
+`GradleDependency`, `AndroidGradlePluginVersion`, `OldTargetApi` et `NewerVersionAvailable` restent :
+chaîne d'outils figée, pas une liste de tâches.
+
+Puis sur le Honor 400, appareil physique :
+
+```bash
+adb shell ls -l /sdcard/Android/data/fr.upjv.bodyvision/files/telemetry
+adb pull /sdcard/Android/data/fr.upjv.bodyvision/files/telemetry/<batchId>.json .
+# repli si l'accès de adb à Android/data est refusé par l'appareil :
+adb exec-out run-as fr.upjv.bodyvision cat \
+  /sdcard/Android/data/fr.upjv.bodyvision/files/telemetry/<batchId>.json > serie.json
+```
+
+- une série de 10 squats (≈ 30 s) : environ 300 images, soit **10 par seconde et non 30** ;
+  33 points par image ; `t` de 0 à ≈ 30 000, strictement croissant ; **≈ 280 Ko**, ce qui recoupe
+  les 0,26 Mo que le contrat annonce pour 300 images ;
+- **critère d'acceptation des images écartées** : sur 10 squats cadrés en trois-quarts, **moins de
+  1 %**, soit au plus 3 sur 300. Au-dessus, on s'arrête : ça voudrait dire que ML Kit rend
+  régulièrement moins de 33 points sur une personne qu'il détecte, ce qui change le périmètre de
+  SCRUM-41 ;
+- une série interrompue par un **quart de tour** : elle se termine, le fichier est écrit, le `t` de
+  la dernière image dit où ;
+- une série interrompue par un **demi-tour** — paysage vers paysage inversé, l'appareil retourné
+  bout pour bout, rotation automatique active : elle doit se terminer **aussi**, alors que la taille
+  d'image ne change pas. C'est le constat bloquant de la relecture, et c'est le seul cas qui ne se
+  voit pas dans le fichier produit : si la série continuait, on y lirait une personne qui se
+  retourne d'un coup au milieu.
+
+  **Mécanisme déjà prouvé sur l'appareil**, le 13/11/2026, sans aucun geste : rotation automatique
+  coupée, un enregistrement en cours, puis `settings put system user_rotation 1` puis `3`, ce qui
+  est exactement la transition `ROTATION_90 → ROTATION_270`. La série s'est terminée
+  (`Série vide, aucun fichier écrit : 98 image(s) écartée(s)`), le bouton est revenu de lui-même sur
+  « Démarrer », l'indicateur a disparu — et **aucune ligne `CameraSessionBinder` n'a été émise**,
+  donc la liaison caméra n'a pas été refaite : les trois premiers chemins n'ont pas pu se déclencher,
+  et c'est bien le quatrième qui a terminé la série.
+
+  Ce que le geste physique ajoute, et qu'il faut savoir avant de le lire : un retournement lent
+  passe par le portrait, et le capteur enchaîne alors `90 → 0 → 270`. Le passage par 0 **change** la
+  configuration, donc la liaison est refaite et c'est le chemin 1 qui termine la série. Le chemin 4
+  n'est exercé que par un retournement assez franc pour que le gestionnaire de fenêtres résolve
+  directement `90 → 270`. Les deux issues sont correctes ; seule la preuve par `adb` distingue
+  laquelle a joué.
+
+  Sur cet appareil, le demi-tour **portrait** n'existe pas : `mAllowAllRotations=false`, donc le
+  capteur n'atteint jamais `ROTATION_180`. `mSeascapeRotation=ROTATION_270` est en revanche bien
+  défini, et l'historique de rotation montre que le capteur l'atteint ;
+- une série interrompue par une **bascule de caméra** : même chose, et jamais deux tailles ni deux
+  objectifs dans un fichier ;
+- **deux enregistrements de suite** : deux noms de fichiers et deux `batchId` différents, le `t` du
+  second repart de 0, son nombre d'images correspond à sa seule durée. C'est la vérification qui
+  remplace le test JVM impossible ;
+- une série poussée jusqu'à **90 secondes** : elle se termine toute seule à 900 images, le fichier
+  est écrit, et le bouton revient de lui-même sur « Démarrer » ;
+- `adb logcat -s TelemetryRecording` : une ligne par série, avec le chemin, les images gardées, les
+  écartées, les hors échantillon et la taille en octets ;
+- aucune image, aucune vidéo sur le disque : seulement des coordonnées.
+
+### Vérification sur appareil — séance du 17/11/2026
+
+Honor 400 (DNY-NX9), Android 16, appareil physique, binaire issu d'une porte complète verte
+(63 tests, 0 erreur lint, 0 violation ktlint). Cadrage trois-quarts à deux ou trois mètres. Neuf
+séries écrites, toutes conformes à `SeriesUpload`.
+
+| Geste | Résultat | Images écartées |
+|---|---|---|
+| 10 squats | 252 images, **9,99 par seconde**, 225 Ko, `t` de 0 à 25 122 | **0** |
+| Deux séries de suite | deux `batchId`, deux fichiers, le second repart à `t = 0` | 0 et 0 |
+| Quart de tour | terminée 41 ms après la liaison refaite, `capture` 480x640 seul | 0 |
+| **Demi-tour** | terminée 3 ms après la rotation, **aucune liaison refaite** | 16 |
+| Bascule de caméra | terminée 148 ms avant la liaison `BACK`, aucune image de l'arrière dedans | 0 |
+| 900 images | **900 exactement**, 89,913 s, **10,00 par seconde**, 793 Ko | **0** |
+| Bouton retour | fichier écrit, 61 images | 0 |
+
+**Zéro image écartée sur les six séries cadrées.** ML Kit rend ses 33 points dès qu'il détecte
+quelqu'un, jamais moins : le critère d'acceptation — moins de 1 %, soit au plus 3 sur 300 — n'a
+jamais été approché. Les 16 du demi-tour sont le temps passé hors cadre en attendant le
+déclenchement, et le compteur à l'écran affichait bien « 0 point » pendant ce temps.
+
+**L'échéance tient son débit.** 9,99 images par seconde sur 25 s avec une entrée à 23,5, puis
+**10,00 sur 90 s** avec la même entrée, écarts médians à 100 ms pile. La règle du seuil qu'elle
+remplace aurait donné ici 7,8 par seconde, et il aurait fallu 115 s pour remplir les 900 images que
+le contrat autorise — pour un `nominalFps` qui en annonce 10. C'est la mesure qui justifie le
+correctif.
+
+**Le demi-tour ne se vérifie pas à la main.** Un retournement lent passe par le portrait, le capteur
+enchaîne `90 → 0 → 270`, la configuration change et c'est le chemin 1 qui termine la série : bon
+résultat, mauvais chemin. Il a donc été forcé par `adb`, rotation automatique coupée et
+`user_rotation` de `3` à `1`, ce qui est exactement la transition qu'aucune nouvelle liaison
+n'accompagne. L'historique de rotation du système horodate la transition à 16:54:29.584, le `endedAt`
+de la série tombe à 16:54:29.587, et **aucune ligne `CameraSessionBinder` n'apparaît** : les chemins
+1 à 3 étaient hors jeu. La rotation automatique a été remise ensuite.
+
+Ce que l'appareil a démenti au passage : le demi-tour **portrait** n'existe pas sur ce modèle
+(`mAllowAllRotations=false`, le capteur n'atteint jamais `ROTATION_180`). Un KDoc l'affirmait, il est
+corrigé.
+
+**Poids réel** : 894 à 903 octets par image, donc 268 Ko pour 300 images — ce qui recoupe les
+0,26 Mo que le contrat annonce. L'estimation de 850 Ko pour 900 images était pessimiste : 793 Ko.
+
+**Un piège de méthode, pour qui refera ces mesures.** Le tampon de `logcat` fait 256 Ko par défaut,
+et le système émet deux lignes `RenderEngine` par image affichée : 13 194 lignes en deux minutes,
+qui chassent la ligne qu'on cherche. La première série a ainsi été perdue pour l'observation, pas
+pour l'application. Porter le tampon à 16 Mo (`adb logcat -G 16M`) avant la séance.
+
+Et `run-as` ne sert à rien pour lire ce dossier : `adb shell ls /sdcard/Android/data/<paquet>/files/`
+fonctionne directement, là où `run-as` se fait refuser l'accès au stockage externe.
+
+### Ce que je t'explique à ce ticket
+
+Pourquoi une locale change le format d'un nombre et pourquoi c'est un piège du JSON ;
+`Dispatchers.Default` contre `Dispatchers.IO`, et pourquoi l'écriture va sur l'un plutôt que
+l'autre ; pourquoi on sous-échantillonne par le temps ; pourquoi l'horloge murale et l'horodatage
+des images ne se mélangent pas ; ce que garantit un `batchId` aujourd'hui et ce qu'il ne garantira
+qu'au S6 ; et pourquoi un encodeur écrit à la main se défend sur ce schéma-là alors qu'il serait une
+mauvaise idée sur un schéma qui change souvent.
+
+### Limites connues
+
+**1. Quitter l'application pendant un enregistrement : corrigé, et l'hypothèse qui précédait était
+fausse.** Ce paragraphe affirmait d'abord qu'il restait « une fenêtre étroite » où la série pouvait
+être perdue. **C'était faux : elle était perdue à chaque fois.** La relecture l'a montré, et le
+raisonnement mérite d'être gardé, parce qu'il ne se lit pas dans le code.
+
+Le bouton retour fait exécuter `ON_PAUSE → ON_STOP → ON_DESTROY` dans un **seul message du looper
+principal**. Donc : `onScreenStopped()` termine bien la série et appelle `stop()`, qui lance une
+coroutine sur `viewModelScope` — `Dispatchers.Main.immediate`, donc son corps démarre tout de suite
+— mais ce corps suspend sur `cancelAndJoin()`, le temps que le collecteur se déroule sur un thread
+`Default`. Sa reprise est un **autre** message du looper, et avant qu'il ne soit traité,
+`onCleared()` a déjà annulé la portée. La coroutine mourait donc avant d'atteindre l'écriture, et
+donc avant d'atteindre le `NonCancellable` qui n'entourait que l'écriture. Trente secondes de série
+perdues, sans une ligne de journal.
+
+Le correctif est d'étendre `NonCancellable` **au joint aussi**, dans les deux chemins de fin : le
+bloc démarre synchronement avant l'annulation, donc il la franchit. Ce qui reste : si le processus
+est tué dans l'intervalle, la série est perdue — mais ce n'est plus le cas courant, c'est une mort
+de processus.
+
+**Éprouvé par l'inverse sur le Honor 400, le 17/11/2026**, parce qu'un comportement correct ne
+prouve pas qu'une barrière sert à quelque chose. `NonCancellable` remis autour de la seule écriture,
+installé, puis cinq secondes d'enregistrement suivies du bouton retour : **aucun fichier** — neuf
+avant, neuf après — et **aucune ligne de journal**. Le fichier restauré par `git checkout --`,
+réinstallé, même geste : un dixième fichier et sa ligne, 68 images gardées, 0 écartée. La perte
+était donc systématique, et le raisonnement sur le looper est confirmé par l'appareil et non
+seulement par la lecture.
+
+Leçon à garder : `NonCancellable` protège ce qu'il **entoure**, pas ce qui suit, et une coroutine
+lancée sur une portée qu'on est en train de détruire n'a qu'un seul tour de looper d'avance.
+
+**2. Le fichier n'est pas une requête.** `uploadSeries` est `POST /sessions/{sessionId}/series` :
+il faut un `sessionId`, qui n'existe pas avant le S6. Ce que SCRUM-37 produit est un **corps** de
+requête valide, à valider contre le schéma, pas un appel.
+
+**3. Une seule série par enregistrement, donc `index` vaut 0.** Le rang d'une série dans une séance
+n'a pas de sens tant qu'il n'y a pas de séance.
+
+**4. `capture.analysisWidth` et `analysisHeight` portent la taille *redressée*, donc 480x640 en
+portrait — ambiguïté du contrat, à faire trancher.** Le nom des champs, leur `example: 640`/`480` et
+la décision figée « résolution d'analyse 640x480 » disent tous les trois « la résolution de
+l'analyse ». Mais le contrat dit aussi « x et y normalisés par `analysisWidth` et `analysisHeight` »
+et « z normalisé par `analysisWidth` », et les coordonnées, elles, sont normalisées par la taille
+**redressée** : en portrait, ML Kit reçoit l'image tournée d'un quart de tour, donc les axes sont
+échangés et c'est par 480 qu'il faut diviser x.
+
+Les deux lectures ne peuvent pas être vraies à la fois. **La valeur écrite est celle qui permet de
+dénormaliser**, parce que c'est à ça que le champ sert dans le texte du contrat : la même série,
+même appareil, même configuration, annonce donc 640x480 tenue en paysage et 480x640 tenue en
+portrait. Un relecteur du fichier de démo y lira une résolution d'analyse qui change, alors que
+c'est le repère des coordonnées qui change.
+
+**Question posée au propriétaire du contrat** — c'est la dernière qui reste ouverte, celle de
+`contractVersion` ayant été tranchée depuis : si la réponse
+est « ce champ est la résolution d'analyse », alors il faut y écrire 640x480 **et** ajouter au
+contrat de quoi dire par quoi les coordonnées sont normalisées — sinon le serveur dénormalisera de
+travers une série sur deux. Le code n'est pas changé en attendant : la valeur actuelle est la seule
+des deux qui soit exploitable.
+
+**5. `endedAt` est calculé, pas observé, et il arrive en retard.** Il vaut `startedAt` plus le `t` de
+la dernière image gardée, donc il mélange **deux horloges**. Les `t` dérivent des horodatages
+**capteur**, pris au début de l'exposition. `startedAt` est l'horloge **murale**, lue au moment où la
+première pose gardée est acceptée par l'accumulateur — donc après l'exposition, la lecture du
+capteur, la livraison de l'image, l'inférence ML Kit, l'émission dans le flux et le réveil du
+collecteur. Tout ce retard se reporte sur `endedAt`.
+
+Conséquence : la **durée** `endedAt − startedAt` est exacte, ses deux bornes dérivant des mêmes
+horodatages capteur. C'est le **placement absolu** du couple qui est décalé tardivement.
+
+La preuve dure, et c'est la seule : dans la série de la bascule de caméra, la ligne de journal qui
+annonce le fichier **écrit** est datée de **46 ms avant** le `endedAt` contenu dans ce même fichier.
+Les deux horodatages viennent de la même horloge murale, et un fichier ne peut pas être écrit avant
+la fin de la série qu'il décrit.
+
+**Ce qui reste ouvert, et il faut le dire ainsi** : l'amplitude n'est pas expliquée. L'écart entre
+`endedAt` et l'événement qui a terminé la série valait +3 ms au demi-tour, +12 ms au quart de tour et
++194 ms à la bascule de caméra. Un modèle à latence unique ne les réconcilie pas — l'écart devrait
+valoir « latence de la première image moins l'âge de la dernière », et l'âge d'une image gardée est
+plafonné par la période d'échantillonnage, ce qui rend +3 et +194 incompatibles entre eux. Le signe
+est donc certain, l'ordre de grandeur est de quelques dizaines à quelques centaines de
+millisecondes, et la cause exacte de la dispersion n'est pas établie. À rouvrir si le Cloud se met à
+corréler des séries entre elles à mieux qu'une demi-seconde ; sans effet sur l'analyse d'une série,
+qui ne dépend que des `t`.
+
+### Hors périmètre, assumé
+
+gzip, client HTTP, envoi, file d'attente hors ligne, nouvelles tentatives, sémantique d'idempotence
+de `batchId`, choix de l'exercice, rattachement à une séance, base locale — tout le S6. Seuil de
+`visibility` (S5), alertes (SCRUM-64), repère de gravité (SCRUM-113), README et démo (SCRUM-38),
+injection de dépendances.

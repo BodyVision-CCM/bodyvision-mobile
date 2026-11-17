@@ -56,6 +56,27 @@ data class LiveSessionUiState(
      */
     val fps: Int = 0,
     /**
+     * Vrai tant qu'une série est en cours d'enregistrement. Un scalaire, et c'est tout ce que
+     * l'écran a besoin de savoir : les images collectées ne passent pas par ici, elles vont
+     * directement de la source de poses à l'accumulateur de la série.
+     *
+     * Repasse à faux dès que la série est close, y compris quand elle se termine **sans que
+     * personne n'ait touché le bouton** — rotation, bascule d'objectif, ou 900e image gardée. Le
+     * bouton revient alors de lui-même sur « Démarrer », et l'indicateur disparaît : montrer un
+     * enregistrement qui n'existe plus ferait croire qu'on capte encore.
+     */
+    val isRecording: Boolean = false,
+    /**
+     * Vrai quand un enregistrement est possible, c'est-à-dire quand le dossier d'écriture est
+     * connu. Faux le temps que l'écran le demande au système, et durablement sur un appareil sans
+     * stockage externe monté.
+     *
+     * L'écran en fait un bouton **inactif** plutôt qu'un bouton sans effet : collecter une série
+     * qu'on ne saurait pas écrire serait pire que ne rien faire, et une action refusée doit se
+     * voir.
+     */
+    val isRecordingAvailable: Boolean = false,
+    /**
      * Nombre de points du squelette dans la dernière pose analysée : 33 quand quelqu'un est
      * dans le cadre, 0 sinon.
      *

@@ -94,10 +94,12 @@ interdit l'architecture et les tests. Il ne vaut que pour cette branche.
 Le contrat OpenAPI fait foi et vit dans le dépôt `BodyVision-CCM/bodyvision-contracts`,
 branche `main`. Ne le recopie pas ici : une copie locale périme en silence.
 
-Format de télémétrie, pour information — à implémenter en S6, pas avant : analyse à
-30 FPS pour l'alerte locale, sous-échantillonnage à 10 FPS avant envoi, encodage compact
-`lm: [[x, y, z, v]]`, coordonnées normalisées 0..1, horodatage relatif, idempotence par
-`batchId`, transport gzip.
+Format de télémétrie : analyse à 30 FPS pour l'alerte locale, sous-échantillonnage à 10 FPS,
+encodage compact `lm: [[x, y, z, v]]`, coordonnées normalisées 0..1, horodatage relatif.
+
+**L'encodage et le sous-échantillonnage sont faits en S4 (SCRUM-37)**, dans un fichier local.
+**Restent au S6** : transport gzip, client HTTP, envoi, file hors ligne et sémantique
+d'idempotence de `batchId`.
 
 ## Conventions d'équipe
 

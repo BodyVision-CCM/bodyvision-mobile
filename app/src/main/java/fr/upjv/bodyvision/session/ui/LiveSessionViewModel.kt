@@ -1,5 +1,6 @@
 package fr.upjv.bodyvision.session.ui
 
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -7,6 +8,7 @@ import fr.upjv.bodyvision.camera.data.CameraLens
 import fr.upjv.bodyvision.camera.data.FrameAnalysis
 import fr.upjv.bodyvision.pose.data.MlKitPoseSource
 import fr.upjv.bodyvision.pose.domain.PoseFrame
+import fr.upjv.bodyvision.telemetry.data.TelemetryRecording
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +20,10 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import java.io.File
 import kotlin.math.roundToInt
+
+private const val TAG = "LiveSessionViewModel"
 
 private const val HAS_BEEN_ASKED_ONCE_KEY = "hasBeenAskedOnce"
 private const val AMBIGUOUS_DENIAL_COUNT_KEY = "ambiguousDenialCount"
@@ -72,6 +77,26 @@ class LiveSessionViewModel(
     val poseFrames: SharedFlow<PoseFrame> = poseSource.frames
 
     /**
+     * L'enregistrement de série. Possédé ici, donc il survit à la rotation : un enregistrement en
+     * cours continue pendant que l'activité est recréée.
+     *
+     * Il collecte le **même** flux que l'overlay. Deux collecteurs d'un `SharedFlow` ne se gênent
+     * pas : chacun avance à son rythme, et l'émission ne suspend jamais l'analyse.
+     */
+    private val recording = TelemetryRecording(viewModelScope, poseSource.frames)
+
+    /**
+     * Le dossier où écrire les séries, donné par l'écran : `getExternalFilesDir` exige un
+     * `Context`, que ce `ViewModel` n'a pas et ne doit pas avoir. Un `File` n'est pas un `Context`,
+     * donc le garder ici ne retient rien.
+     *
+     * `null` tant que l'écran ne l'a pas fourni, ou si l'appareil n'a pas de stockage externe.
+     *
+     * Lu et écrit sur le thread principal seulement.
+     */
+    private var telemetryDirectory: File? = null
+
+    /**
      * Les objectifs que l'appareil offre réellement, tels que l'écran les a demandés à CameraX.
      *
      * Champ ordinaire et non [SavedStateHandle] : c'est une propriété de l'appareil, redemandée à
@@ -116,8 +141,15 @@ class LiveSessionViewModel(
         }.onStart { poseSource.consumeAnalyzedFrameCount() }
 
     val uiState: StateFlow<LiveSessionUiState> =
-        combine(mutableUiState, poseCounters) { state, counters ->
-            state.copy(fps = counters.fps, detectedLandmarkCount = counters.landmarkCount)
+        combine(mutableUiState, poseCounters, recording.isRecording) { state, counters, isRecording ->
+            state.copy(
+                fps = counters.fps,
+                detectedLandmarkCount = counters.landmarkCount,
+                // Publié par l'enregistrement et non par `mutableUiState`, parce qu'il peut
+                // retomber tout seul : une série se termine aussi sur une rotation ou à la 900e
+                // image. Une seule source de vérité, et c'est celle qui sait.
+                isRecording = isRecording,
+            )
         }.stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(SUBSCRIPTION_GRACE_MS),
@@ -284,6 +316,75 @@ class LiveSessionViewModel(
     }
 
     /**
+     * Le dossier d'écriture des séries, observé par l'écran. Idempotente : l'écran le redonne à
+     * chaque recréation de l'activité, et c'est le même.
+     *
+     * `null` est un cas normal — un appareil sans stockage externe monté — et il se traite par un
+     * bouton d'enregistrement sans effet, pas par une levée.
+     */
+    fun onTelemetryDirectoryObserved(directory: File?) {
+        telemetryDirectory = directory
+        // Publié dans l'état : un bouton sans effet, c'est une action refusée sans le dire. Mieux
+        // vaut qu'il soit visiblement inactif tant qu'on ne sait pas où écrire.
+        mutableUiState.update { it.copy(isRecordingAvailable = directory != null) }
+    }
+
+    /**
+     * La rotation de l'affichage a changé, **sans que la liaison caméra soit refaite**.
+     *
+     * C'est le quatrième chemin de discontinuité, et le seul qui n'en avait pas : un demi-tour —
+     * paysage vers paysage inversé, et sur un appareil qui l'autorise portrait vers portrait
+     * inversé, ce que le Honor 400 ne fait pas (`mAllowAllRotations=false`) — ne change pas la
+     * configuration, donc aucun `onDispose` ne passe par [onCameraUnbound]. L'analyse, elle, se met
+     * à rendre des coordonnées tournées de 180°, et la taille redressée est **la même** : la règle
+     * de taille de l'accumulateur ne peut donc pas le voir.
+     *
+     * Sans ça, une série enregistrée à cheval sur un demi-tour contiendrait deux repères, avec un
+     * `t` continu et une seule taille annoncée — un fichier valide au schéma et faux au mouvement,
+     * que rien en aval ne pourrait détecter.
+     *
+     * Les poses en cours sont oubliées ici comme aux trois autres discontinuités, et pas seulement
+     * pour l'overlay : le `replay = 1` du flux sert la dernière pose à **tout nouveau collecteur**,
+     * et un enregistrement démarré dans les dizaines de millisecondes qui suivent un demi-tour en
+     * est un. Sa première image gardée serait alors celle d'**avant** la rotation — celle qui fixe
+     * `startedAt` et le repère de toute la série.
+     *
+     * **Vérifié sur le Honor 400 le 17/11/2026**, et ce chemin ne se vérifie pas autrement qu'en
+     * forçant la rotation : un retournement à la main passe presque toujours par le portrait, ce qui
+     * change la configuration et fait terminer la série par [onCameraUnbound] — le bon résultat, mais
+     * par le chemin 1. En forçant `user_rotation` de `3` à `1` pendant un enregistrement, la série
+     * s'est terminée 3 ms après la rotation, son fichier a été écrit, et **aucune ligne de liaison
+     * caméra n'a été émise** : les trois autres chemins étaient donc hors jeu. Détail dans
+     * `docs/plan-s4.md`.
+     */
+    fun onDisplayRotationChanged() {
+        poseSource.discardPendingFrames()
+        recording.stop()
+    }
+
+    /**
+     * Le bouton d'enregistrement. Démarre une série, ou termine celle en cours.
+     *
+     * L'état lu est celui de l'enregistrement lui-même et non [uiState], qui peut être en retard
+     * d'un battement : décider d'après un affichage périmé démarrerait une seconde série par-dessus
+     * la première.
+     */
+    fun onRecordingToggled() {
+        if (recording.isRecording.value) {
+            recording.stop()
+            return
+        }
+        val directory = telemetryDirectory
+        if (directory == null) {
+            // Collecter une série qu'on ne saurait pas écrire serait pire que ne rien faire : on
+            // afficherait un enregistrement en cours pour un fichier qui n'arriverait jamais.
+            Log.w(TAG, "Aucun stockage propre à l'application : enregistrement impossible")
+            return
+        }
+        recording.start(directory)
+    }
+
+    /**
      * Une liaison caméra vient d'être défaite : bascule d'objectif, rotation, ou simple sortie de
      * l'écran.
      *
@@ -291,9 +392,14 @@ class LiveSessionViewModel(
      * bon moment pour oublier les poses en cours : la dernière décrit un objectif ou une rotation
      * d'image qui ne sont plus à l'écran, et le `replay = 1` du flux la servirait au prochain
      * collecteur.
+     *
+     * C'est aussi la fin d'une série en cours, et c'est **ici** que la bascule d'objectif est
+     * détectée : la taille d'image, elle, ne la verrait pas — arrière et frontale rendent toutes
+     * deux du 640x480 — alors qu'une série ne doit jamais mélanger deux caméras.
      */
     fun onCameraUnbound() {
         poseSource.discardPendingFrames()
+        recording.stop()
     }
 
     // Ordre dont dépend la bascule, et il mérite d'être écrit : au changement d'objectif, cet
@@ -313,9 +419,13 @@ class LiveSessionViewModel(
      * cycle de vie, et il lui faut quelques centaines de millisecondes pour livrer une image au
      * retour — la pose d'avant la veille serait dessinée pendant tout ce temps, et elle peut
      * avoir dix minutes.
+     *
+     * Une série en cours se termine donc ici, et son fichier est écrit : une série qui porterait un
+     * trou de dix minutes dans ses horodatages ne décrirait aucun mouvement réel.
      */
     fun onScreenStopped() {
         poseSource.discardPendingFrames()
+        recording.stop()
     }
 
     fun onCameraUnavailable() {
@@ -336,8 +446,13 @@ class LiveSessionViewModel(
     fun onCameraRecoveringChanged(isRecovering: Boolean) {
         // Sur la transition seulement, pas à chaque appel : l'aperçu se figeant, la dernière pose
         // décrit une image que la caméra ne voit plus, et le `replay = 1` la servirait à l'overlay
-        // dès son retour.
-        if (isRecovering && !mutableUiState.value.isCameraRecovering) poseSource.discardPendingFrames()
+        // dès son retour. Une série en cours se termine du même coup : la caméra ne livre plus
+        // d'image, donc la série s'arrêterait de fait — autant l'écrire plutôt que la laisser
+        // ouverte sur une attente dont on ne sait pas la durée.
+        if (isRecovering && !mutableUiState.value.isCameraRecovering) {
+            poseSource.discardPendingFrames()
+            recording.stop()
+        }
         mutableUiState.update { it.copy(isCameraRecovering = isRecovering) }
     }
 

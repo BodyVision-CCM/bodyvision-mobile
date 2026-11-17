@@ -47,6 +47,17 @@ class CameraSessionBinder(
     private var displayListener: DisplayManager.DisplayListener? = null
 
     /**
+     * La dernière rotation **écrite sur l'analyse**, pour ne signaler que les changements réels :
+     * `onDisplayChanged` se déclenche aussi pour une fréquence de rafraîchissement ou une
+     * luminosité, et la rotation y est le plus souvent la même.
+     *
+     * `null` quand la vue n'était pas encore attachée à la liaison : on ne sait alors pas quelle
+     * rotation CameraX a prise par défaut, et le premier événement est traité comme un
+     * changement — un arrêt de trop coûte moins cher qu'une image retournée au milieu d'une série.
+     */
+    private var trackedDisplayRotation: Int? = null
+
+    /**
      * L'état de la caméra **de la liaison courante**, et son observateur.
      *
      * Gardés tous les deux parce qu'il faut l'un pour retirer l'autre. Le cycle de vie ne suffit
@@ -100,6 +111,7 @@ class CameraSessionBinder(
         analysis: FrameAnalysis? = null,
         onUnavailable: () -> Unit,
         onRecoveringChanged: (Boolean) -> Unit,
+        onDisplayRotationChanged: () -> Unit,
     ) {
         val bindToken = ++currentBindToken
         val providerFuture = ProcessCameraProvider.getInstance(context)
@@ -117,6 +129,7 @@ class CameraSessionBinder(
                     analysis,
                     onUnavailable,
                     onRecoveringChanged,
+                    onDisplayRotationChanged,
                 )
             } catch (e: Exception) {
                 // Rattrapée parce qu'on sait quoi en faire : l'écran propose de réessayer.
@@ -147,6 +160,7 @@ class CameraSessionBinder(
         analysis: FrameAnalysis?,
         onUnavailable: () -> Unit,
         onRecoveringChanged: (Boolean) -> Unit,
+        onDisplayRotationChanged: () -> Unit,
     ) {
         provider.unbindAll()
 
@@ -163,7 +177,7 @@ class CameraSessionBinder(
             )
 
         watchCameraState(camera, lifecycleOwner, onUnavailable, onRecoveringChanged)
-        newAnalysis?.let { trackDisplayRotation(it, displayProvider) }
+        newAnalysis?.let { trackDisplayRotation(it, displayProvider, onDisplayRotationChanged) }
         logBoundUseCases(lens, preview, newAnalysis)
     }
 
@@ -356,6 +370,12 @@ class CameraSessionBinder(
      * pas la configuration, donc rien n'est relié, mais `ROTATION_90 → ROTATION_270` est bien un
      * changement de rotation d'affichage, et `onDisplayChanged` le signale.
      *
+     * C'est aussi pourquoi [onDisplayRotationChanged] existe : ce chemin est une **discontinuité du
+     * flux d'images** que rien d'autre ne rapporte — ni une nouvelle liaison, ni l'arrêt de l'écran,
+     * ni une reprise caméra — alors que les coordonnées qui en sortent changent de repère. À qui ça
+     * sert, c'est à l'appelant de le savoir ; cette couche se contente de dire que la rotation a
+     * changé, et seulement quand elle a vraiment changé.
+     *
      * **L'affichage suivi est celui de la vue**, pas l'affichage par défaut, et les événements sont
      * filtrés sur son identifiant — exactement ce que fait le `DisplayRotationListener` de
      * `PreviewView`. Prendre `DEFAULT_DISPLAY` suffirait sur un téléphone, et divergerait dès que
@@ -389,9 +409,11 @@ class CameraSessionBinder(
     private fun trackDisplayRotation(
         analysis: ImageAnalysis,
         displayProvider: () -> Display?,
+        onDisplayRotationChanged: () -> Unit,
     ) {
         // Celui d'une liaison précédente écrirait sur un `ImageAnalysis` démonté.
         unregisterDisplayListener()
+        trackedDisplayRotation = null
 
         val displayManager = ContextCompat.getSystemService(context, DisplayManager::class.java)
         if (displayManager == null) {
@@ -407,7 +429,10 @@ class CameraSessionBinder(
         // le défaut de CameraX tient — la rotation de l'affichage par défaut au moment de la
         // création du cas d'usage — et le premier événement d'affichage corrigera le cas, rare, où
         // la fenêtre vit sur un autre écran.
-        displayProvider()?.let { analysis.targetRotation = it.rotation }
+        displayProvider()?.let {
+            analysis.targetRotation = it.rotation
+            trackedDisplayRotation = it.rotation
+        }
 
         displayListener =
             object : DisplayManager.DisplayListener {
@@ -417,6 +442,18 @@ class CameraSessionBinder(
                     val display = displayProvider() ?: return
                     if (displayId != display.displayId) return
                     analysis.targetRotation = display.rotation
+
+                    // Un demi-tour est le seul changement de repère d'image qui ne passe **pas**
+                    // par une nouvelle liaison : paysage vers paysage inversé ne change pas la
+                    // configuration, donc aucun `onDispose` ne vient le signaler. L'analyse, elle,
+                    // se met bien à rendre des coordonnées tournées de 180°. Sans ce rappel, un
+                    // enregistrement en cours mettrait deux repères dans un même fichier — une
+                    // personne qui se retourne instantanément au milieu d'une série — sans que rien
+                    // en aval puisse le détecter, puisque la taille redressée est inchangée.
+                    if (display.rotation != trackedDisplayRotation) {
+                        trackedDisplayRotation = display.rotation
+                        onDisplayRotationChanged()
+                    }
                 }
 
                 override fun onDisplayAdded(displayId: Int) = Unit
