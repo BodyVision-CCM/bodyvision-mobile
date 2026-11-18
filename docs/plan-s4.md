@@ -980,3 +980,111 @@ gzip, client HTTP, envoi, file d'attente hors ligne, nouvelles tentatives, séma
 de `batchId`, choix de l'exercice, rattachement à une séance, base locale — tout le S6. Seuil de
 `visibility` (S5), alertes (SCRUM-64), repère de gravité (SCRUM-113), README et démo (SCRUM-38),
 injection de dépendances.
+
+---
+
+## SCRUM-38 — Démo du jalon 1 et README de l'application
+
+Branche `feat/scrum-38-demo-readme`, depuis `main` à `58add85`. **Aucun code touché.**
+
+### Contexte
+
+Le jalon 1 demande deux choses démontrables : « Squelette filaire affiché en temps réel sur le
+téléphone, et extraction du JSON de télémétrie » (README de l'organisation, § *Les quatre jalons*).
+Les deux sont dans `main` depuis SCRUM-36 et SCRUM-37, et les mesures sont au dossier. Ce qui
+manquait, c'est la porte d'entrée : le `README.md` tenait en une ligne, et aucun scénario de
+démonstration n'était reproductible par quelqu'un d'autre.
+
+Il n'y aura pas de vidéo : **la démo, c'est le document.** C'est ce qui lui impose d'être daté,
+chiffré et rejouable.
+
+### Ce qui est écrit
+
+```
+README.md                 remplace l'unique ligne : état présent du dépôt, et renvois
+                          aux plans pour l'historique
+docs/demo-jalon-1.md      le scénario de la démonstration, daté, avec deux schémas Mermaid
+CLAUDE.md                 la seule section « Périmètre actuel », qui annonçait encore le S3
+```
+
+Deux principes, parce qu'ils décident du contenu plus que n'importe quelle section :
+
+- **Le README décrit le présent et ne raconte pas l'histoire.** Ce qui a été décidé, pourquoi, et
+  ce qui a été démenti en route reste dans `docs/plan-s3.md` et `docs/plan-s4.md` ; le README y
+  renvoie. Un README qui raconte devient faux à chaque ticket, et personne ne le relit.
+- **Aucun chiffre sans source.** Chaque mesure citée porte sa provenance — `CLAUDE.md`, la séance
+  du 17/11, ou la sortie de la porte — et ce qui n'est pas mesuré est dit comme tel.
+
+### Ce que le ticket affirmait et que le dépôt a démenti
+
+1. **Aucun débit en flux live n'existe dans le dépôt.** `docs/plan-s3.md` ne contient qu'un critère
+   (« ≥ 24 images par seconde »), et la ligne de vérification de SCRUM-36 est un contrôle *prévu*,
+   pas un relevé. Les seuls débits mesurés sont ceux du spike SCRUM-22 (`CLAUDE.md`) et ceux de la
+   séance du 17/11. Le README le dit explicitement et renvoie l'optimisation à SCRUM-41, au S5.
+2. **« De profil, ML Kit confond gauche et droite » n'est écrit nulle part** — ni dans `docs/`, ni
+   dans le code, ni dans `CLAUDE.md`. Le cadrage trois-quarts est donc justifié par ce qui est
+   sourcé : c'est celui sous lequel les chiffres du 17/11 ont été relevés.
+3. **Le contrat a avancé** de `b60f9fa` (`info.version` 0.4.1) à `26f4d19` (0.4.2) après la
+   validation du fichier de démo. `SeriesUpload` et `Frame` y sont **identiques** — le 0.4.2
+   n'ajoute qu'une description sur `/auth/refresh` — donc la validation tient. Raison de plus pour
+   que la doc ne nomme aucune version de document et s'en tienne à `contractVersion: "1.0"`, la
+   version du **format**.
+4. **`CLAUDE.md` annonçait encore « sprint S3 »** alors que `main` portait SCRUM-36 et 37. Corrigé
+   ici, par exception et dans un commit à part : seule la section « Périmètre actuel », les
+   paragraphes « pas de réseau » et « pas de base locale » laissés tels quels.
+5. **« JDK 17 » est juste, mais c'est la version qui *construit*** (`.github/workflows/ci.yml`) ;
+   la cible de compilation du projet est le bytecode **Java 11**. Le README distingue les deux,
+   parce que la confusion est exactement ce qu'un jury relève.
+6. **La CI ne lance pas `ktlintCheck` explicitement** : elle lance
+   `clean build test lint --rerun-tasks`, et ktlint s'exécute parce que son greffon s'accroche à
+   `check`, dont `build` dépend.
+7. **« La seule permission déclarée au manifeste » était faux, et c'est la première version de ce
+   README qui l'écrivait.** Le manifeste des sources ne déclare que `CAMERA`, mais le manifeste
+   **fusionné** en contient **sept** : `INTERNET` et `ACCESS_NETWORK_STATE` viennent de
+   `com.google.mlkit:pose-detection-common`, `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED` et
+   `FOREGROUND_SERVICE` d'`androidx.work:work-runtime` — dépendance transitive de ML Kit — et une
+   permission de signature d'`androidx.core:core`. Provenance lue dans
+   `app/build/outputs/logs/manifest-merger-debug-report.txt` après
+   `:app:processDebugMainManifest`.
+
+   La doc le dit maintenant, et s'arrête là : **ce dépôt n'a pas la source de ce que ces
+   bibliothèques font de ces permissions, donc il ne l'affirme pas.** Ce qu'il peut affirmer de son
+   propre code est vérifiable : aucune dépendance HTTP déclarée, et l'`ImageProxy` passé à ML Kit
+   puis fermé sur les trois chemins sans jamais être copié ni écrit (`pose/data/MlKitPoseSource.kt`).
+   La leçon de méthode : **une affirmation de sécurité se lit dans le manifeste fusionné, jamais
+   dans celui des sources.**
+
+### Vérification
+
+Vérifier une documentation, c'est exécuter ce qu'elle dit. Les deux commandes du README, lancées
+telles qu'écrites :
+
+```powershell
+.\gradlew.bat clean build test lint --rerun-tasks
+.\gradlew.bat ktlintCheck --rerun-tasks
+```
+
+`BUILD SUCCESSFUL`, **63 tests**, 0 échec, **0 erreur** lint pour 12 avertissements de la chaîne
+figée, **0 violation** ktlint. C'est ce compte de tests — et pas un souvenir — qui figure dans la
+documentation.
+
+Puis, par script : les **22 liens relatifs** des deux fichiers pointent vers un fichier existant, et
+chacune des **ancres** citées correspond à un titre réel de ce plan. Les ancres à suffixe
+(`#limites-connues-1`) viennent de titres dupliqués entre les sections SCRUM-36 et SCRUM-37 : c'est
+fragile, donc le texte de chaque lien nomme la section, pour qu'un lien qui pourrirait laisse quand
+même le lecteur au bon endroit. Enfin : aucun chemin de machine, aucune adresse, aucun numéro de
+série, aucun identifiant de projet Cloud dans les deux fichiers.
+
+### Commits
+
+Trois, dans cet ordre :
+
+1. `docs:` cette section ;
+2. `docs:` le `README.md` et `docs/demo-jalon-1.md` ;
+3. `docs:` la section « Périmètre actuel » de `CLAUDE.md`.
+
+### Hors périmètre
+
+L'infrastructure Terraform, démontrée dans le dépôt `bodyvision-infrastructure` et citée ici par un
+lien. Les fichiers JSON enregistrés, qui ne vont pas dans le dépôt : ce sont des mesures du corps
+d'une personne, et des données de démonstration n'ont pas leur place dans l'historique d'un code.

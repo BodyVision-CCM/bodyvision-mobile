@@ -62,10 +62,14 @@ reste `0 errors` ; le compte d'avertissements n'est pas un objectif.
 - L'analyse d'image tourne sur son propre exécuteur, jamais sur le thread principal.
 - Les coordonnées ML Kit dépendent de la rotation de l'image : normaliser avant usage.
 
-## Périmètre actuel — sprint S3
+## Périmètre actuel — le sprint S4 est terminé
 
-Tickets en cours : SCRUM-30 (initialisation, lint, tests), SCRUM-31 (CameraX et
+Livré au S4, et dans `main` : SCRUM-36 (squelette filaire en surimpression), SCRUM-37
+(extraction des landmarks et JSON de télémétrie), SCRUM-38 (démo du jalon 1 et README).
+Le S3 l'était déjà : SCRUM-30 (initialisation, lint, tests), SCRUM-31 (CameraX et
 permissions), SCRUM-32 (détection de pose en flux live).
+
+**Prochain ticket mobile : SCRUM-41** — optimisation du débit — au sprint S5.
 
 **Pas de code réseau dans ce dépôt pour l'instant.** Le client HTTP, le cache hors-ligne
 et la file d'envoi arrivent au sprint S6. La règle générale « prévoir le hors-ligne dès
