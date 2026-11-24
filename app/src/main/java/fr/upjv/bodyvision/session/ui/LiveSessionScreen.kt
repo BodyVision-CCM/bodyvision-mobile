@@ -31,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -52,6 +53,7 @@ import fr.upjv.bodyvision.R
 import fr.upjv.bodyvision.camera.data.CameraLens
 import fr.upjv.bodyvision.camera.data.availableCameraLenses
 import fr.upjv.bodyvision.camera.ui.CameraPreview
+import fr.upjv.bodyvision.metrics.data.observeThermalStatus
 import fr.upjv.bodyvision.pose.ui.SkeletonOverlay
 import fr.upjv.bodyvision.telemetry.data.TELEMETRY_DIRECTORY_NAME
 import kotlinx.coroutines.Dispatchers
@@ -141,6 +143,19 @@ fun LiveSessionScreen(viewModel: LiveSessionViewModel = viewModel()) {
     LaunchedEffect(Unit) {
         val directory = withContext(Dispatchers.IO) { context.getExternalFilesDir(TELEMETRY_DIRECTORY_NAME) }
         viewModel.onTelemetryDirectoryObserved(directory)
+    }
+
+    // L'état thermique, pour la ligne de mesure de débit. Observé ici et non dans le `ViewModel`
+    // pour la même raison que les deux au-dessus : `PowerManager` exige un `Context`.
+    // `DisposableEffect` et non `LaunchedEffect` : il y a un écouteur système à retirer, sans quoi
+    // il survivrait à l'écran.
+    // `viewModel` est une clé au même titre que `context` : le libellé part dans la sonde que ce
+    // `ViewModel` possède, donc un écran recomposé avec un autre `ViewModel` doit réenregistrer
+    // l'écouteur. Inatteignable avec la fabrique par défaut, mais la clé est le seul endroit où ça
+    // se lit.
+    DisposableEffect(context, viewModel) {
+        val stopObserving = observeThermalStatus(context, viewModel::onThermalStatusObserved)
+        onDispose { stopObserving() }
     }
 
     // L'arrêt ne défait pas la liaison — `CameraPreview` reste dans la composition — donc rien

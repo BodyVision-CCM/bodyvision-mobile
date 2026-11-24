@@ -1,6 +1,7 @@
 package fr.upjv.bodyvision.pose.data
 
 import android.media.Image
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.core.ExperimentalGetImage
@@ -11,6 +12,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
 import fr.upjv.bodyvision.camera.data.FrameAnalysis
+import fr.upjv.bodyvision.metrics.data.ThroughputProbe
 import fr.upjv.bodyvision.pose.domain.PoseFrame
 import fr.upjv.bodyvision.pose.domain.UprightImageSize
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -40,11 +42,16 @@ private const val THROTTLED_LOG_PERIOD = 100
  * Une inférence lancée, et ce qu'il faut garder de l'image pour lire son résultat : les
  * dimensions redressées et l'horodatage, qui ne seront plus lisibles sur l'`ImageProxy` une fois
  * celui-ci fermé.
+ *
+ * [startNanos] est l'instant pris **juste avant** `process()` : c'est l'origine de la latence
+ * d'inférence, et elle est portée ici parce que c'est l'écouteur de succès, sur un autre tour de
+ * l'exécuteur, qui la refermera.
  */
 private class StartedInference(
     val task: Task<Pose>,
     val size: UprightImageSize,
     val timestampNanos: Long,
+    val startNanos: Long,
 )
 
 /**
@@ -59,8 +66,15 @@ private class StartedInference(
  * Aucun `Context` n'est demandé — `PoseDetection.getClient` n'en a pas besoin — donc le
  * `ViewModel` qui possède cette source reste constructible par la fabrique par défaut de
  * `viewModel()`.
+ *
+ * [probe] reçoit ce que cette boucle observe — images reçues, images jetées, inférences réussies et
+ * leur latence — et c'est elle qui écrit la ligne de mesure. Elle est **donnée** et non créée ici :
+ * son rappel de capture doit vivre aussi longtemps que la liaison caméra, et c'est le `ViewModel`
+ * qui a cette durée de vie.
  */
-class MlKitPoseSource {
+class MlKitPoseSource(
+    private val probe: ThroughputProbe,
+) {
     private val detector = PoseDetection.getClient(mlKitPoseDetectorOptions())
     private val analysisExecutor =
         Executors.newSingleThreadExecutor { runnable -> Thread(runnable, ANALYSIS_THREAD_NAME) }
@@ -130,6 +144,7 @@ class MlKitPoseSource {
         FrameAnalysis(
             analyzer = ImageAnalysis.Analyzer { analyze(it) },
             executor = analysisExecutor,
+            sessionCaptureCallback = probe.sessionCaptureCallback,
         )
 
     /**
@@ -199,12 +214,36 @@ class MlKitPoseSource {
      * **`imageProxy.close()` est appelé sur les trois chemins** : sortie anticipée, succès et
      * échec — les deux derniers par l'écouteur de complétion, qui couvre aussi l'annulation. Un
      * `close()` manqué gèle la caméra au bout de quelques images, sans aucun message.
+     *
+     * **La première instruction du corps doit rester non levante**, et c'est le comptage de la
+     * sonde : il est avant le premier `close()` et hors de tout `try`, donc une levée y laisserait
+     * l'image jamais rendue au pool de CameraX — le gel sans message, encore. La sonde est écrite
+     * pour ça : lecture d'horloge, lecture d'un `StateFlow`, incréments, écriture dans un tableau
+     * préalloué, et au plus un `Log.i` par fenêtre. Rien qui lève. À relire si elle change.
      */
     @OptIn(ExperimentalGetImage::class)
     private fun analyze(imageProxy: ImageProxy) {
+        // Comptée avant toute décision et pour **toutes** les images, y compris celles qu'on
+        // abandonne juste après : c'est ce qui rend vrai `recv = drop_gate + drop_other + inf +
+        // fail` dans la ligne de mesure, donc l'écart avec le compte du capteur égal à ce que
+        // CameraX a jeté en silence.
+        probe.onFrameReceived(imageProxy.imageInfo.timestamp)
+
         val mediaImage = imageProxy.image
-        if (isClosing || mediaImage == null || !isInferenceInFlight.compareAndSet(false, true)) {
-            // Aucun portillon à rendre : l'évaluation court-circuite, donc il n'a pas été pris.
+        if (isClosing || mediaImage == null) {
+            // Comptées à part du portillon, et c'est la mesure qui l'exige : celui-ci est une
+            // contre-pression attendue, là où une fermeture en cours et une image sans tampon sont
+            // une fin de vie et une anomalie. Les trois causes d'un `drop_other` non nul — ces
+            // deux et une dimension refusée plus bas — se distinguent dans les lignes étranglées
+            // de cette classe, et non dans la colonne, qui ne sert qu'à dire qu'il y en a eu.
+            probe.onFrameDroppedOtherwise()
+            imageProxy.close()
+            return
+        }
+
+        if (!isInferenceInFlight.compareAndSet(false, true)) {
+            // Aucun portillon à rendre : il n'a pas été pris.
+            probe.onFrameDroppedByGate()
             imageProxy.close()
             return
         }
@@ -230,6 +269,7 @@ class MlKitPoseSource {
         if (inference == null) {
             // Rejet ou levée : un seul endroit rend le portillon et ferme l'image, parce que
             // c'est ici, et nulle part ailleurs, qu'on sait qu'il a été pris.
+            probe.onFrameDroppedOtherwise()
             isInferenceInFlight.set(false)
             imageProxy.close()
             return
@@ -240,6 +280,12 @@ class MlKitPoseSource {
             // sur le thread principal, et la conversion des 33 landmarks y tomberait 30 fois
             // par seconde.
             .addOnSuccessListener(analysisExecutor) { pose ->
+                // **En premier, avant toute conversion** : la latence mesurée doit être celle de
+                // `process()`, comme au spike SCRUM-22, et non celle de `process()` plus la
+                // construction d'une map de 33 entrées. C'est aussi ici que la sonde clôt une
+                // fenêtre échue, donc l'écriture de la ligne de mesure a lieu entre deux inférences
+                // et jamais pendant l'une d'elles.
+                probe.onInferenceSucceeded(inference.startNanos)
                 val frame = pose.toPoseFrame(inference.size, inference.timestampNanos)
                 // Compté avant l'émission, comme `onFrameAnalyzed` dans le spike : ce chiffre
                 // doit rester comparable aux 29,4 FPS de SCRUM-22, qui comptaient les succès de
@@ -255,6 +301,10 @@ class MlKitPoseSource {
                 // `DROP_OLDEST`, il réussit toujours et ne suspend jamais.
                 mutableFrames.tryEmit(frame)
             }.addOnFailureListener(analysisExecutor) { cause ->
+                // Comptée, et pas seulement journalisée : le relevé de débit ne garde que
+                // l'étiquette de mesure, donc une perte qui n'existe que dans cette ligne-ci est
+                // une perte invisible pendant une séance de dix minutes.
+                probe.onInferenceFailed()
                 Log.w(TAG, "Échec de l'inférence de pose", cause)
             }.addOnCompleteListener(analysisExecutor) {
                 isInferenceInFlight.set(false)
@@ -283,10 +333,16 @@ class MlKitPoseSource {
             return null
         }
 
+        val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+        // Pris juste avant `process()` et avec `elapsedRealtimeNanos`, exactement comme au spike
+        // SCRUM-22 : c'est la définition qui a produit les 26,4 ms, et la changer rendrait les deux
+        // chiffres incomparables.
+        val startNanos = SystemClock.elapsedRealtimeNanos()
         return StartedInference(
-            task = detector.process(InputImage.fromMediaImage(mediaImage, rotationDegrees)),
+            task = detector.process(inputImage),
             size = size,
             timestampNanos = imageProxy.imageInfo.timestamp,
+            startNanos = startNanos,
         )
     }
 

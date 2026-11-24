@@ -5,6 +5,9 @@ import android.hardware.display.DisplayManager
 import android.util.Log
 import android.util.Size
 import android.view.Display
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraState
 import androidx.camera.core.ImageAnalysis
@@ -329,6 +332,23 @@ class CameraSessionBinder(
         cameraState = null
     }
 
+    /**
+     * L'analyse d'image, avec la résolution et la contre-pression figées en SCRUM-22, et le rappel
+     * de capture de la mesure.
+     *
+     * **Ce rappel est la seule façon de compter les images que le capteur produit.** Avec
+     * `STRATEGY_KEEP_ONLY_LATEST`, CameraX en jette avant de nous les livrer — dans la file de
+     * l'`ImageReader` puis dans son cache d'une image — et l'analyseur ne voit jamais ces pertes.
+     * `Camera2Interop` le pose sur la configuration du cas d'usage ; CameraX l'enregistre alors sur
+     * la requête **répétée** de la session, donc il est appelé une fois par image complétée par le
+     * HAL. Le chemin est écrit, sources à l'appui, dans `docs/plan-s5.md`.
+     *
+     * `Camera2Interop` est marqué expérimental et n'a pas d'équivalent stable : il n'existe pas
+     * d'autre façon d'atteindre un rappel de capture camera2 depuis CameraX. Rien n'est **posé** sur
+     * la requête pour autant — pas de `setCaptureRequestOption` — donc aucun réglage de la caméra
+     * ne change, et la mesure ne peut pas déplacer ce qu'elle mesure.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun newImageAnalysis(analysis: FrameAnalysis): ImageAnalysis {
         val resolutionSelector =
             ResolutionSelector
@@ -340,11 +360,16 @@ class CameraSessionBinder(
                     ),
                 ).build()
 
-        return ImageAnalysis
-            .Builder()
-            .setResolutionSelector(resolutionSelector)
-            // Décision figée : toute autre valeur fait s'accumuler les frames et fausse la latence.
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        val builder =
+            ImageAnalysis
+                .Builder()
+                .setResolutionSelector(resolutionSelector)
+                // Décision figée : toute autre valeur fait s'accumuler les frames et fausse la latence.
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+
+        Camera2Interop.Extender(builder).setSessionCaptureCallback(analysis.sessionCaptureCallback)
+
+        return builder
             .build()
             .also { it.setAnalyzer(analysis.executor, analysis.analyzer) }
     }

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import fr.upjv.bodyvision.camera.data.CameraLens
 import fr.upjv.bodyvision.camera.data.FrameAnalysis
+import fr.upjv.bodyvision.metrics.data.ThroughputProbe
 import fr.upjv.bodyvision.pose.data.MlKitPoseSource
 import fr.upjv.bodyvision.pose.domain.PoseFrame
 import fr.upjv.bodyvision.telemetry.data.TelemetryRecording
@@ -60,10 +61,27 @@ class LiveSessionViewModel(
     private val savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
     /**
+     * La sonde de débit, possédée ici pour la même raison que la source de pose : son rappel de
+     * capture doit vivre aussi longtemps que la liaison caméra, et ses agrégats ne doivent pas
+     * repartir de zéro à chaque quart de tour — un run de mesure dure dix minutes.
+     *
+     * `isRecording` est une **lecture** et non une copie : l'enregistrement a déjà sa source de
+     * vérité dans [recording], et garder un drapeau ici ferait deux états à resynchroniser à la
+     * main. La lambda est appelée depuis l'exécuteur d'analyse, donc longtemps après la
+     * construction de ce `ViewModel` — [recording] est initialisée plus bas, mais elle l'est bien
+     * avant le premier appel.
+     *
+     * C'est ce renvoi en avant qui oblige [recording] à porter son type explicitement : sans lui,
+     * l'inférence tourne en rond — cette sonde dépend de l'enregistrement, qui dépend de la source
+     * de pose, qui dépend de cette sonde — et le compilateur le dit mot pour mot.
+     */
+    private val throughputProbe = ThroughputProbe(isRecording = { recording.isRecording.value })
+
+    /**
      * Possédée ici et non dans un composable : un `remember` ne survit pas à la rotation, donc
      * chaque quart de tour recréerait le détecteur et relancerait la chauffe ML Kit.
      */
-    private val poseSource = MlKitPoseSource()
+    private val poseSource = MlKitPoseSource(throughputProbe)
 
     /** Passé à `CameraPreview`, qui le transmet à la liaison caméra. */
     val frameAnalysis: FrameAnalysis = poseSource.frameAnalysis
@@ -83,7 +101,7 @@ class LiveSessionViewModel(
      * Il collecte le **même** flux que l'overlay. Deux collecteurs d'un `SharedFlow` ne se gênent
      * pas : chacun avance à son rythme, et l'émission ne suspend jamais l'analyse.
      */
-    private val recording = TelemetryRecording(viewModelScope, poseSource.frames)
+    private val recording: TelemetryRecording = TelemetryRecording(viewModelScope, poseSource.frames)
 
     /**
      * Le dossier où écrire les séries, donné par l'écran : `getExternalFilesDir` exige un
@@ -327,6 +345,19 @@ class LiveSessionViewModel(
         // Publié dans l'état : un bouton sans effet, c'est une action refusée sans le dire. Mieux
         // vaut qu'il soit visiblement inactif tant qu'on ne sait pas où écrire.
         mutableUiState.update { it.copy(isRecordingAvailable = directory != null) }
+    }
+
+    /**
+     * L'état thermique du téléphone, observé par l'écran — `PowerManager` exige un `Context`, que
+     * ce `ViewModel` n'a pas et ne doit pas avoir, comme pour les objectifs et le dossier de
+     * télémétrie.
+     *
+     * Un **libellé** et non un code : la ligne de mesure l'écrit tel quel, et la sonde n'a pas à
+     * connaître `PowerManager`. Il ne passe pas par l'état de l'écran, qui ne l'affiche pas : c'est
+     * une donnée de mesure, pas une information pour qui regarde l'aperçu.
+     */
+    fun onThermalStatusObserved(label: String) {
+        throughputProbe.thermalLabel = label
     }
 
     /**
